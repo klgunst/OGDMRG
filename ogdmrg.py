@@ -54,17 +54,18 @@ class OGDMRG:
 
         u, s, v = svd(A2)
         svd_diff = (s[:-1] - s[1:]) / s[:-1]
+
         # Array with Trues every time this singular value is different than the
         # previous one (up to a tolerance)
-        new_sval = np.concatenate(([True], svd_diff > tol))
+        new_sval = np.concatenate(
+            ([0], np.where(svd_diff > tol)[0] + 1, [len(s)])
+        )
 
         # Truncating renormalized basis
         #
         # The kept basis states can be larger than te one specified by the
         # user, we just try not to cut up degenerate singular values.
-        for D, nsv in enumerate(new_sval[D:], start=D):
-            if nsv:
-                break
+        D = new_sval[-1 if new_sval[-1] < D else np.argmax(new_sval >= D)]
         self.A = u.reshape(self.M, self.p, -1)[:, :, :D]
 
     def update_Heff(self):
