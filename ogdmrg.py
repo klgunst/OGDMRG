@@ -8,7 +8,6 @@ class OGDMRG:
 
         self.p = self.Hloc.shape[0]
         self.HA = np.zeros((self.M, self.p, self.M, self.p))
-        self.cnt = 0
 
     @property
     def M(self):
@@ -50,7 +49,7 @@ class OGDMRG:
     def renormalize_basis(self, A2, D, tol=1e-10):
         """Renormalize the basis.
         """
-        from numpy.linalg import svd
+        from numpy.linalg import svd, qr
 
         u, s, v = svd(A2)
         svd_diff = (s[:-1] - s[1:]) / s[:-1]
@@ -65,8 +64,28 @@ class OGDMRG:
         #
         # The kept basis states can be larger than te one specified by the
         # user, we just try not to cut up degenerate singular values.
-        D = new_sval[-1 if new_sval[-1] < D else np.argmax(new_sval >= D)]
-        self.A = u.reshape(self.M, self.p, -1)[:, :, :D]
+        lastmultiplet = -1 if new_sval[-1] < D else np.argmax(new_sval >= D)
+        D = new_sval[lastmultiplet]
+        u = u[:, :D]
+
+        for begin, end in zip(new_sval[:lastmultiplet], new_sval[1:]):
+            U = qr(u[:, begin:end].T, mode='r').T
+
+            # First nonzero element in each column
+            fnz = U[np.argmin(np.isclose(U, 0), axis=0), range(U.shape[1])]
+            U = U * (1 - 2 * (fnz < 0))[None, :]
+            u[:, begin:end] = U
+
+        A = u.reshape(self.M, self.p, -1)
+        # print(A.reshape(-1, D))
+        try:
+            diff = np.linalg.norm(A.ravel() - self.Aold.ravel())
+        except (ValueError, AttributeError):
+            diff = None
+            pass
+        self.A, self.Aold = A, self.A
+
+        return np.linalg.norm(s[D:]), diff
 
     def update_Heff(self):
         """Update the effective Hamiltonian for the new renormalized basis
@@ -86,20 +105,30 @@ class OGDMRG:
         from scipy.sparse.linalg import eigsh, LinearOperator
 
         i = 0
-        while i < 100:
+        prevEtot = 0
+        prevEtot2 = 0
+        while i < 10000:
             i += 1
-            self.cnt += 1
             H = LinearOperator(((self.M * self.p) ** 2,) * 2,
                                matvec=lambda x: self.Heff(x))
 
             w, v = eigsh(H, k=1)
-            self.E = w[0] / self.cnt / 2
+            try:
+                self.E = (w[0] - prevEtot2) / 4
+            except AttributeError:
+                self.E = w[0] / 2
+            prevEtot, prevEtot2 = w[0], prevEtot
             A2 = v[:, 0].reshape((self.M * self.p, self.p * self.M))
 
-            print(f"E: {self.E:.12f}, \tΔE: {self.E + np.log(2) - 0.25:.3g}")
-
-            self.renormalize_basis(A2, D)
+            trunc, diff = self.renormalize_basis(A2, D)
             self.update_Heff()
+
+            try:
+                print(f"E: {self.E:.12f},\tΔE: {self.E + np.log(2) - 1/4:.3g},"
+                      f"\ttrunc: {trunc:.3g},\tΔ: {diff:.3g}")
+            except TypeError:
+                print(f"E: {self.E:.12f},\tΔE: {self.E + np.log(2) - 1/4:.3g},"
+                      f"\ttrunc: {trunc:.3g}")
 
     def run(self, **kwargs):
         self.kernel(**kwargs)
@@ -107,4 +136,10 @@ class OGDMRG:
 
 
 if __name__ == '__main__':
-    bla = OGDMRG().run(D=16)
+    from sys import argv
+    try:
+        D = int(argv[1])
+    except IndexError:
+        D = 16
+
+    bla = OGDMRG(multipl=3).run(D=D)
