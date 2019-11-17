@@ -58,6 +58,8 @@ class OGDMRG:
         Internally it is stored as a deque of a certain length. The current
         A-tensor is the first element of the deque, previous A-tensors are the
         other elements of the deque.
+
+        NOTE: The deque is usefull for later when guage fixing works.
         """
         return self._A_deque[0]
 
@@ -73,6 +75,8 @@ class OGDMRG:
 
     @property
     def guageDiff(self):
+        """For later once the guage fixing works...
+        """
         raise ValueError
 
     def S_operators(multipl=2):
