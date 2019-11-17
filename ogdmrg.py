@@ -2,18 +2,61 @@ import numpy as np
 
 
 class OGDMRG:
-    def __init__(self, H=None, multipl=2):
-        self.Hloc = OGDMRG.HeisenbergInteraction(multipl) if H is None else H
-        self.A = np.ones(1)
+    def __init__(self, NN_interaction=None, multipl=2):
+        if NN_interaction is None:
+            self.NN_interaction = OGDMRG.HeisenbergInteraction(multipl)
+        else:
+            self.NN_interaction = NN_interaction
 
-        self.p = self.Hloc.shape[0]
+        self.A = np.ones((1, 1))
         self.HA = np.zeros((self.M, self.p, self.M, self.p))
+        self.E = 0
+        self.Etot = 0
 
     @property
     def M(self):
+        """The current bond dimension used for DMRG.
+
+        It is equal to the last dimension of the current A tensor.
+        """
         return self.A.shape[-1]
 
+    @property
+    def p(self):
+        """The dimension of the local physical basis.
+        """
+        assert len(self.NN_interaction.shape) == 4
+        return self.NN_interaction.shape[0]
+
+    @property
+    def A(self):
+        """The current A-tensor.
+
+        Internally it is stored as a deque of a certain length. The current
+        A-tensor is the first element of the deque, previous A-tensors are the
+        other elements of the deque.
+        """
+        return self._A_deque[0]
+
+    @A.setter
+    def A(self, A):
+        from collections import deque
+        # A deque is also initialized so to keep track of previous A's
+        try:
+            self._A_deque.appendleft(A)
+        except AttributeError:
+            # The deque is not initialized yet
+            self._A_deque = deque(A, maxlen=3)
+
+    @property
+    def guageDiff(self):
+        raise ValueError
+
     def S_operators(multipl=2):
+        """Returns the S+, S-, and Sz operators in for a spin.
+
+        The operators are represented in the Sz basis: (-m, -m + 1, ..., m)
+        """
         j = (multipl - 1) / 2
         # magnetic quantum number for eacht basis state in the local basis
         m = np.arange(multipl) - j
@@ -43,7 +86,7 @@ class OGDMRG:
         # shape: l i r j
         x = x.reshape(self.M, self.p, self.M, self.p)
         result = result.reshape(self.M, self.p, self.M, self.p)
-        result += np.einsum('xyij,lirj->lxry', self.Hloc, x)
+        result += np.einsum('xyij,lirj->lxry', self.NN_interaction, x)
         return result.ravel()
 
     def renormalize_basis(self, A2, D, tol=1e-10):
@@ -51,7 +94,7 @@ class OGDMRG:
         """
         from numpy.linalg import svd, qr
 
-        u, s, v = svd(A2)
+        u, s, v = svd(A2.reshape((self.M * self.p, self.M * self.p)))
         svd_diff = (s[:-1] - s[1:]) / s[:-1]
 
         # Array with Trues every time this singular value is different than the
@@ -76,16 +119,8 @@ class OGDMRG:
             U = U * (1 - 2 * (fnz < 0))[None, :]
             u[:, begin:end] = U
 
-        A = u.reshape(self.M, self.p, -1)
-        # print(A.reshape(-1, D))
-        try:
-            diff = np.linalg.norm(A.ravel() - self.Aold.ravel())
-        except (ValueError, AttributeError):
-            diff = None
-            pass
-        self.A, self.Aold = A, self.A
-
-        return np.linalg.norm(s[D:]), diff
+        self.A = u.reshape((self.M, self.p, -1))
+        return np.linalg.norm(s[D:])
 
     def update_Heff(self):
         """Update the effective Hamiltonian for the new renormalized basis
@@ -99,47 +134,55 @@ class OGDMRG:
         self.HA = self.HA.reshape(self.M, self.p, self.M, self.p)
 
         A = self.A.reshape(oldM, self.p, self.M)
-        self.HA += np.einsum('aib,ajc,ikjl->bkcl', A, A, self.Hloc)
+        self.HA += np.einsum('aib,ajc,ikjl->bkcl', A, A, self.NN_interaction)
 
-    def kernel(self, D=16):
+    def kernel(self, D=16, max_iter=100, verbosity=2):
+        """Executing of the DMRG algorithm.
+
+        Args:
+            D: The bond dimension to use for DMRG. The algorithm can choose
+            a bond dimension larger than the one specified to avoid truncating
+            between renormalized states degenerate in their singular values.
+
+            max_iter: The maximal iterations to use in the DMRG algorithm.
+
+            verbosity: 0: Don't print anything.
+                       1: Print results for the optimization.
+                       2: Print intermediate result at every even chain length.
+        """
         from scipy.sparse.linalg import eigsh, LinearOperator
 
-        i = 0
-        prevEtot = 0
-        prevEtot2 = 0
-        while i < 10000:
-            i += 1
-            H = LinearOperator(((self.M * self.p) ** 2,) * 2,
-                               matvec=lambda x: self.Heff(x))
+        for i in range(0, max_iter, 2):
+            # even/odd chain length
+            for j in range(2):
+                H = LinearOperator(((self.M * self.p) ** 2,) * 2,
+                                   matvec=lambda x: self.Heff(x))
+                # Diagonalize
+                w, v = eigsh(H, k=1)
+                # Renormalize the basis
+                trunc = self.renormalize_basis(v[:, 0], D)
+                # Update the effective Hamiltonian
+                self.update_Heff()
 
-            w, v = eigsh(H, k=1)
-            try:
-                self.E = (w[0] - prevEtot2) / 4
-            except AttributeError:
-                self.E = w[0] / 2
-            prevEtot, prevEtot2 = w[0], prevEtot
-            A2 = v[:, 0].reshape((self.M * self.p, self.p * self.M))
+            # Energy difference between this and the previous even-length chain
+            E = (w[0] - self.Etot) / 4
+            ΔE, self.E, self.Etot = self.E - E, E, w[0]
 
-            trunc, diff = self.renormalize_basis(A2, D)
-            self.update_Heff()
-
-            try:
-                print(f"E: {self.E:.12f},\tΔE: {self.E + np.log(2) - 1/4:.3g},"
-                      f"\ttrunc: {trunc:.3g},\tΔ: {diff:.3g}")
-            except TypeError:
-                print(f"E: {self.E:.12f},\tΔE: {self.E + np.log(2) - 1/4:.3g},"
-                      f"\ttrunc: {trunc:.3g}")
-
-    def run(self, **kwargs):
-        self.kernel(**kwargs)
-        return self
+            if verbosity >= 2:
+                print(f"it {i}:\tM: {self.M},\tE: {self.E:.12f},\t"
+                      f"ΔE: {ΔE:.3g},\ttrunc: {trunc:.3g}")
+        if verbosity >= 1:
+            print(f"M: {self.M},\tE: {self.E:.12f},\t"
+                  f"ΔE: {ΔE:.3g},\ttrunc: {trunc:.3g}")
 
 
 if __name__ == '__main__':
     from sys import argv
-    try:
-        D = int(argv[1])
-    except IndexError:
-        D = 16
+    if len(argv) > 1:
+        D = [int(d) for d in argv[1:]]
+    else:
+        D = [16]
 
-    bla = OGDMRG(multipl=3).run(D=D)
+    ogdmrg = OGDMRG()
+    for d in D:
+        ogdmrg.kernel(D=d, max_iter=100)
