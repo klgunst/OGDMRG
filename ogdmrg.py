@@ -2,7 +2,30 @@ import numpy as np
 
 
 class OGDMRG:
+    """
+    Attributes:
+        NN_interaction
+        HA
+        E
+        Etot
+    """
     def __init__(self, NN_interaction=None, multipl=2):
+        """Initializes the OGDMRG object.
+
+        Args:
+            NN_interaction: The nearest neighbour interaction. If None, a
+            Heisenberg interaction is assumed.
+
+            For more information how the passed NN interaction should be
+            structured, see the HeisenbergInteraction function.
+
+            multipl: If NN_interaction is not None, this argument is ignored.
+            If NN_interaction is None, this argument specifies the multiplicity
+            of each spin for the Heisenberg interaction.
+
+            E.g. For `multipl = 2`, we work with spin-1/2.
+                 For `multipl = 3`, we work with spin-1.
+        """
         if NN_interaction is None:
             self.NN_interaction = OGDMRG.HeisenbergInteraction(multipl)
         else:
@@ -55,7 +78,11 @@ class OGDMRG:
     def S_operators(multipl=2):
         """Returns the S+, S-, and Sz operators in for a spin.
 
-        The operators are represented in the Sz basis: (-m, -m + 1, ..., m)
+        The operators are represented in the Sz basis: (-j, -j + 1, ..., j)
+
+        Args:
+            multipl: defines which multiplicity the total spin of the site has.
+            Thus specifies j as `j = (multipl - 1) / 2`
         """
         j = (multipl - 1) / 2
         # magnetic quantum number for eacht basis state in the local basis
@@ -120,7 +147,7 @@ class OGDMRG:
             u[:, begin:end] = U
 
         self.A = u.reshape((self.M, self.p, -1))
-        return np.linalg.norm(s[D:])
+        return s[D:] @ s[D:]
 
     def update_Heff(self):
         """Update the effective Hamiltonian for the new renormalized basis
@@ -133,8 +160,9 @@ class OGDMRG:
         self.HA = np.kron(tH, np.eye(self.p))
         self.HA = self.HA.reshape(self.M, self.p, self.M, self.p)
 
-        A = self.A.reshape(oldM, self.p, self.M)
-        self.HA += np.einsum('aib,ajc,ikjl->bkcl', A, A, self.NN_interaction)
+        A = self.A.reshape(oldM, self.p * self.M)
+        B = (A.T @ A).reshape(self.p, self.M, self.p, self.M)
+        self.HA += np.einsum('ibjc,ikjl->bkcl', B, self.NN_interaction)
 
     def kernel(self, D=16, max_iter=100, verbosity=2):
         """Executing of the DMRG algorithm.
@@ -175,6 +203,8 @@ class OGDMRG:
             print(f"M: {self.M},\tE: {self.E:.12f},\t"
                   f"ΔE: {ΔE:.3g},\ttrunc: {trunc:.3g}")
 
+        return self.E
+
 
 if __name__ == '__main__':
     from sys import argv
@@ -185,4 +215,4 @@ if __name__ == '__main__':
 
     ogdmrg = OGDMRG()
     for d in D:
-        ogdmrg.kernel(D=d, max_iter=100)
+        ogdmrg.kernel(D=d)
