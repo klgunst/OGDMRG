@@ -4,10 +4,10 @@ import numpy as np
 class OGDMRG:
     """
     Attributes:
-        NN_interaction
-        HA
-        E
-        Etot
+        NN_interaction: The Nearest neighbour interaction for the hamiltonian
+        HA: The current effective Hamiltonian
+        E: The current energy per site
+        Etot: The current total energy of the system
     """
     def __init__(self, NN_interaction=None, multipl=2):
         """Initializes the OGDMRG object.
@@ -95,25 +95,38 @@ class OGDMRG:
         return Sp, Sp.T, Sz
 
     def HeisenbergInteraction(multipl=2):
-        """Returns interaction between two sites.
+        """Returns Heisenberg interaction between two sites.
 
-        Interaction is given in a dense matrix with indices:
-            bra_1, bra_2, ket_1, ket_2
+        This is given by:
+            1/2 * (S_1^+ S_2^- + S_1^- S_2^+) + S_1^z S_2^z
+
+        Interaction is given in a dense matrix:
+            Σ H_{1', 2', 1, 2} |1'〉|2'〉〈1|〈2|
         """
         Sp, Sm, Sz = OGDMRG.S_operators(multipl)
         H = 0.5 * (np.kron(Sp, Sm) + np.kron(Sm, Sp)) + np.kron(Sz, Sz)
         return H.reshape((multipl,) * 4)
 
     def Heff(self, x):
-        # shape: (l i) (j j)
-        x = x.reshape(self.M * self.p, -1)
-        result = self.HA.reshape(self.M * self.p, -1) @ x
-        result += x @ self.HA.reshape(self.M * self.p, -1).T
+        """Executing the Effective Hamiltonian on the two-site object `x`.
 
-        # shape: l i r j
+        The Effective Hamiltonian exists out of:
+            * Interactions between left environment and left site
+            * Interactions between right environment and right site
+            * Interactions between the left and right site
+
+        Returns H_A * x.
+        """
+        x = x.reshape(self.M * self.p, -1)
+        # Interactions between left environment and left site
+        result = self.HA.reshape(self.M * self.p, -1) @ x
+        # Interactions between right environment and right site
+        result += x @ self.HA.reshape(self.M * self.p, -1).T
+        # Interactions between left and right site
         x = x.reshape(self.M, self.p, self.M, self.p)
         result = result.reshape(self.M, self.p, self.M, self.p)
         result += np.einsum('xyij,lirj->lxry', self.NN_interaction, x)
+
         return result.ravel()
 
     def renormalize_basis(self, A2, D, tol=1e-10):
@@ -138,6 +151,9 @@ class OGDMRG:
         D = new_sval[lastmultiplet]
         u = u[:, :D]
 
+        # Trying to fix the guage
+        #
+        # TODO: Does not seem to work yet?
         for begin, end in zip(new_sval[:lastmultiplet], new_sval[1:]):
             U = qr(u[:, begin:end].T, mode='r').T
 
@@ -150,17 +166,16 @@ class OGDMRG:
         return s[D:] @ s[D:]
 
     def update_Heff(self):
-        """Update the effective Hamiltonian for the new renormalized basis
+        """Update the effective Hamiltonian for the new renormalized basis.
         """
-        oldM = self.A.shape[0]
-        Mp = oldM * self.p
+        Mp = self.A.shape[0] * self.A.shape[1]
 
         A = self.A.reshape(Mp, -1)
         tH = A.T @ self.HA.reshape(Mp, Mp) @ A
         self.HA = np.kron(tH, np.eye(self.p))
         self.HA = self.HA.reshape(self.M, self.p, self.M, self.p)
 
-        A = self.A.reshape(oldM, self.p * self.M)
+        A = self.A.reshape(-1, self.p * self.M)
         B = (A.T @ A).reshape(self.p, self.M, self.p, self.M)
         self.HA += np.einsum('ibjc,ikjl->bkcl', B, self.NN_interaction)
 
