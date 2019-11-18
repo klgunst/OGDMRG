@@ -1,6 +1,58 @@
 import numpy as np
 
 
+def S_operators(multipl=2):
+    """Returns the S+, S-, and Sz operators in for a spin.
+    The operators are represented in the Sz basis: (-j, -j + 1, ..., j)
+
+        Args:
+            multipl: defines which multiplicity the total spin of the site has.
+            Thus specifies j as `j = (multipl - 1) / 2`
+    """
+    j = (multipl - 1) / 2
+    # magnetic quantum number for eacht basis state in the local basis
+    m = np.arange(multipl) - j
+
+    Sz = np.diag(m)
+    Sp = np.zeros(Sz.shape)
+    Sp[range(1, multipl), range(0, multipl - 1)] = \
+        np.sqrt((j - m) * (j + m + 1))[:-1]
+    return Sp, Sp.T, Sz
+
+
+def HeisenbergInteraction(multipl=2):
+    """Returns Heisenberg interaction between two sites.
+
+        This is given by:
+            1/2 * (S_1^+ S_2^- + S_1^- S_2^+) + S_1^z S_2^z
+
+        Interaction is given in a dense matrix:
+            Σ H_{1', 2', 1, 2} |1'〉|2'〉〈1|〈2|
+    """
+    Sp, Sm, Sz = S_operators(multipl)
+    H = 0.5 * (np.kron(Sp, Sm) + np.kron(Sm, Sp)) + np.kron(Sz, Sz)
+    return H.reshape((multipl,) * 4)
+
+
+def IsingInteraction(multipl=2, J=1):
+    """Returns Ising interaction between two sites.
+
+        This is given by:
+            1/2 * (S_1^+  + S_1^- + S_2^+ + S_2^-) + S_1^z S_2^z
+
+        Interaction is given in a dense matrix:
+            Σ H_{1', 2', 1, 2} |1'〉|2'〉〈1|〈2|
+    """
+    Sp, Sm, Sz = S_operators(multipl)
+    unity = np.eye(Sp.shape[0])
+    H = 0.5 * (
+        np.kron(Sp, unity) + np.kron(Sm, unity) +
+        np.kron(unity, Sp) + np.kron(unity, Sm)
+    ) + J * np.kron(Sz, Sz)
+
+    return H.reshape((multipl,) * 4)
+
+
 class OGDMRG:
     """
     Attributes:
@@ -9,36 +61,27 @@ class OGDMRG:
         E: The current energy per site
         Etot: The current total energy of the system
     """
-    def __init__(self, NN_interaction='Heisenberg', multipl=2):
+    def __init__(self, NN_interaction=None):
         """Initializes the OGDMRG object.
 
         Args:
             NN_interaction: The nearest neighbour interaction.
 
-            This can be set to "Heisenberg" or "Ising" for Heisenberg or Ising
-            interactions respectively.
+            If None assume Heisenberg interaction.
 
             This can also be set to a tensor representing the NN interaction.
 
             For more information how the passed NN interaction should be
             structured, see the HeisenbergInteraction function.
-
-            multipl: If NN_interaction is not "Heisenberg" or "Ising", this
-            argument is ignored, else this argument specifies the multiplicity
-            of each spin for the given interaction.
-
-            E.g. For `multipl = 2`, we work with spin-1/2.
-                 For `multipl = 3`, we work with spin-1.
         """
-        if NN_interaction == 'Heisenberg':
-            self.NN_interaction = OGDMRG.HeisenbergInteraction(multipl)
-        elif NN_interaction == 'Ising':
-            self.NN_interaction = OGDMRG.IsingInteraction(multipl)
+        if NN_interaction is None:
+            self.NN_interaction = HeisenbergInteraction()
         else:
             self.NN_interaction = NN_interaction
 
         self.A = np.ones((1, 1))
         self.HA = np.zeros((self.M, self.p, self.M, self.p))
+        self.HB = np.zeros((self.M, self.p, self.M, self.p))
         self.E = 0
         self.Etot = 0
 
@@ -79,7 +122,8 @@ class OGDMRG:
             self._s_deque.appendleft(s)
         except AttributeError:
             # The deque is not initialized yet
-            self._s_deque = deque(s, maxlen=3)
+            self._s_deque = deque(maxlen=3)
+            self._s_deque.appendleft(s)
 
     @A.setter
     def A(self, A):
@@ -89,7 +133,8 @@ class OGDMRG:
             self._A_deque.appendleft(A)
         except AttributeError:
             # The deque is not initialized yet
-            self._A_deque = deque(A, maxlen=3)
+            self._A_deque = deque(maxlen=3)
+            self._A_deque.appendleft(A)
 
     @property
     def A_diff(self):
@@ -105,55 +150,6 @@ class OGDMRG:
         s_diag = np.diag(self._s_deque[0] * self._s_deque[-1])
         return np.linalg.norm(A1.T @ A2 - s_diag)
 
-    def S_operators(multipl=2):
-        """Returns the S+, S-, and Sz operators in for a spin.
-The operators are represented in the Sz basis: (-j, -j + 1, ..., j)
-
-        Args:
-            multipl: defines which multiplicity the total spin of the site has.
-            Thus specifies j as `j = (multipl - 1) / 2`
-        """
-        j = (multipl - 1) / 2
-        # magnetic quantum number for eacht basis state in the local basis
-        m = np.arange(multipl) - j
-
-        Sz = np.diag(m)
-        Sp = np.zeros(Sz.shape)
-        Sp[range(1, multipl), range(0, multipl - 1)] = \
-            np.sqrt((j - m) * (j + m + 1))[:-1]
-        return Sp, Sp.T, Sz
-
-    def HeisenbergInteraction(multipl=2):
-        """Returns Heisenberg interaction between two sites.
-
-        This is given by:
-            1/2 * (S_1^+ S_2^- + S_1^- S_2^+) + S_1^z S_2^z
-
-        Interaction is given in a dense matrix:
-            Σ H_{1', 2', 1, 2} |1'〉|2'〉〈1|〈2|
-        """
-        Sp, Sm, Sz = OGDMRG.S_operators(multipl)
-        H = 0.5 * (np.kron(Sp, Sm) + np.kron(Sm, Sp)) + np.kron(Sz, Sz)
-        return H.reshape((multipl,) * 4)
-
-    def IsingInteraction(multipl=2):
-        """Returns Ising interaction between two sites.
-
-        This is given by:
-            1/2 * (S_1^+  + S_1^- + S_2^+ + S_2^-) + S_1^z S_2^z
-
-        Interaction is given in a dense matrix:
-            Σ H_{1', 2', 1, 2} |1'〉|2'〉〈1|〈2|
-        """
-        Sp, Sm, Sz = OGDMRG.S_operators(multipl)
-        unity = np.eye(Sp.shape[0])
-        H = 0.5 * (
-            np.kron(Sp, unity) + np.kron(Sm, unity) +
-            np.kron(unity, Sp) + np.kron(unity, Sm)
-        ) + 3.9 * np.kron(Sz, Sz)
-
-        return H.reshape((multipl,) * 4)
-
     def Heff(self, x):
         """Executing the Effective Hamiltonian on the two-site object `x`.
 
@@ -168,7 +164,7 @@ The operators are represented in the Sz basis: (-j, -j + 1, ..., j)
         # Interactions between left environment and left site
         result = self.HA.reshape(self.M * self.p, -1) @ x
         # Interactions between right environment and right site
-        result += x @ self.HA.reshape(self.M * self.p, -1).T
+        result += x @ self.HB.reshape(self.M * self.p, -1)
         # Interactions between left and right site
         x = x.reshape(self.M, self.p, self.M, self.p)
         result = result.reshape(self.M, self.p, self.M, self.p)
@@ -201,18 +197,24 @@ The operators are represented in the Sz basis: (-j, -j + 1, ..., j)
             lastmultiplet -= 1
         D = new_sval[lastmultiplet]
         u = u[:, :D]
+        v = v[:D, :]
 
         # Trying to fix the guage
         for begin, end in zip(new_sval[:lastmultiplet], new_sval[1:]):
-            U = qr(u[:, begin:end].T, mode='r').T
+            Q, U = qr(u[:, begin:end].T)
+            U = U.T
 
             # First nonzero element in each column
             fnz = U[np.argmin(np.isclose(U, 0), axis=0), range(U.shape[1])]
-            U = U * (1 - 2 * (fnz < 0))[None, :]
-            u[:, begin:end] = U
+            u[:, begin:end] = U * (1 - 2 * (fnz < 0))[None, :]
+            Q = Q * (1 - 2 * (fnz < 0))[None, :]
 
-        self.A = u.reshape((self.M, self.p, -1))
+            v[begin:end, :] = Q.T @ v[begin:end, :]
+
+        self.B = v.T.reshape(self.M, self.p, -1)
+        self.A = u.reshape(self.M, self.p, -1)
         self.s = s[:D]
+
         return s[D:] @ s[D:]
 
     def update_Heff(self):
@@ -226,8 +228,18 @@ The operators are represented in the Sz basis: (-j, -j + 1, ..., j)
         self.HA = self.HA.reshape(self.M, self.p, self.M, self.p)
 
         A = self.A.reshape(-1, self.p * self.M)
-        B = (A.T @ A).reshape(self.p, self.M, self.p, self.M)
-        self.HA += np.einsum('ibjc,ikjl->bkcl', B, self.NN_interaction)
+        X = (A.T @ A).reshape(self.p, self.M, self.p, self.M)
+        self.HA += np.einsum('ibjc,ikjl->bkcl', X, self.NN_interaction)
+
+        Mp = self.B.shape[0] * self.B.shape[1]
+        B = self.B.reshape(Mp, -1)
+        tH = B.T @ self.HB.reshape(Mp, Mp) @ B
+        self.HB = np.kron(tH, np.eye(self.p))
+        self.HB = self.HB.reshape(self.M, self.p, self.M, self.p)
+
+        B = self.B.reshape(-1, self.p * self.M)
+        X = (B.T @ B).reshape(self.p, self.M, self.p, self.M)
+        self.HB += np.einsum('ibjc,ikjl->bkcl', X, self.NN_interaction)
 
     def kernel(self, D=16, max_iter=100, verbosity=2):
         """Executing of the DMRG algorithm.
@@ -259,11 +271,16 @@ The operators are represented in the Sz basis: (-j, -j + 1, ..., j)
             E = (w[0] - self.Etot) / 2
             ΔE, self.E, self.Etot = self.E - E, E, w[0]
 
-            if verbosity >= 2 and i > 10:
-                print(f"it {i}:\tM: {self.M},\tE: {self.E:.12f},\t"
-                      f"ΔE: {ΔE:.3g},\ttrunc: {trunc:.3g},\t"
-                      f"A_diff {self.A_diff}"
-                      )
+            if verbosity >= 2:
+                try:
+                    print(f"it {i}:\tM: {self.M},\tE: {self.E:.12f},\t"
+                          f"ΔE: {ΔE:.3g},\ttrunc: {trunc:.3g},\t"
+                          f"A_diff {self.A_diff}"
+                          )
+                except ValueError:
+                    print(f"it {i}:\tM: {self.M},\tE: {self.E:.12f},\t"
+                          f"ΔE: {ΔE:.3g},\ttrunc: {trunc:.3g},\t"
+                          )
             else:
                 print(f"it {i}:\tM: {self.M},\tE: {self.E:.12f},\t"
                       f"ΔE: {ΔE:.3g},\ttrunc: {trunc:.3g},\t"
@@ -282,7 +299,6 @@ if __name__ == '__main__':
     else:
         D = [16]
 
-    # ogdmrg = OGDMRG(NN_interaction="Ising")
     ogdmrg = OGDMRG()
     for d in D:
         ogdmrg.kernel(D=d, max_iter=1000)
