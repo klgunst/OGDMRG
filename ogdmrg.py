@@ -20,6 +20,15 @@ def S_operators(multipl=2):
     return Sp, Sp.T, Sz
 
 
+def four_site(NN):
+    pd = NN.shape[0]
+    NN = NN.reshape(pd * pd, -1)
+    NN2 = 0.5 * np.kron(NN, np.eye(pd ** 2)).reshape((pd ** 2,) * 4)
+    NN2 += 0.5 * np.kron(np.eye(pd ** 2), NN).reshape((pd ** 2,) * 4)
+    NNtemp = np.kron(np.eye(pd), NN).reshape((pd ** 3,) * 2)
+    return (NN2 + np.kron(NNtemp, np.eye(pd)).reshape((pd ** 2,) * 4)) / 2
+
+
 def HeisenbergInteraction(multipl=2):
     """Returns Heisenberg interaction between two sites.
 
@@ -34,7 +43,7 @@ def HeisenbergInteraction(multipl=2):
     return H.reshape((multipl,) * 4)
 
 
-def IsingInteraction(multipl=2, J=1):
+def IsingInteraction(multipl=2, J=4):
     """Returns Ising interaction between two sites.
 
         This is given by:
@@ -79,7 +88,6 @@ class OGDMRG:
         else:
             self.NN_interaction = NN_interaction
 
-        self.A = np.ones((1, 1))
         self.HA = np.zeros((self.M, self.p, self.M, self.p))
         self.HB = np.zeros((self.M, self.p, self.M, self.p))
         self.E = 0
@@ -91,7 +99,11 @@ class OGDMRG:
 
         It is equal to the last dimension of the current A tensor.
         """
-        return self.A.shape[-1]
+        try:
+            return self.A.shape[-1]
+        except AttributeError:
+            # No A given yet
+            return 1
 
     @property
     def p(self):
@@ -140,15 +152,11 @@ class OGDMRG:
     def A_diff(self):
         """The difference between the current A and the one two iterations ago.
         """
-        A1 = self._A_deque[0].reshape(-1, self._A_deque[0].shape[-1]) * \
-            self._s_deque[0]
-        A2 = self._A_deque[-1].reshape(-1, self._A_deque[-1].shape[-1]) * \
-            self._s_deque[-1]
-        # print(self._s_deque[0] - self._s_deque[-1])
-        # print(self._s_deque[0])
-        # print(A1.T @ A2 - np.diag(self._s_deque[0] * self._s_deque[-1]))
+        A1 = self._A_deque[0].reshape(-1, self._A_deque[0].shape[-1])
+        A2 = self._A_deque[-1].reshape(-1, self._A_deque[-1].shape[-1])
+        XX = np.diag(self._s_deque[0]) @ A1.T @ A2 @ np.diag(self._s_deque[-1])
         s_diag = np.diag(self._s_deque[0] * self._s_deque[-1])
-        return np.linalg.norm(A1.T @ A2 - s_diag)
+        return np.linalg.norm(XX - s_diag)
 
     def Heff(self, x):
         """Executing the Effective Hamiltonian on the two-site object `x`.
@@ -239,7 +247,7 @@ class OGDMRG:
 
         B = self.B.reshape(-1, self.p * self.M)
         X = (B.T @ B).reshape(self.p, self.M, self.p, self.M)
-        self.HB += np.einsum('ibjc,ikjl->bkcl', X, self.NN_interaction)
+        self.HB += np.einsum('ibjc,kilj->bkcl', X, self.NN_interaction)
 
     def kernel(self, D=16, max_iter=100, verbosity=2):
         """Executing of the DMRG algorithm.
@@ -299,6 +307,7 @@ if __name__ == '__main__':
     else:
         D = [16]
 
-    ogdmrg = OGDMRG()
+    ogdmrg = OGDMRG(NN_interaction=four_site(HeisenbergInteraction()))
+
     for d in D:
         ogdmrg.kernel(D=d, max_iter=1000)
