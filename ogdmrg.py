@@ -53,7 +53,7 @@ def IsingInteraction(multipl=2, J=4):
     return H.reshape((multipl,) * 4)
 
 
-class DMRG:
+class OGDMRG:
     """
     Attributes:
         NN_interaction: The Nearest neighbour interaction for the hamiltonian
@@ -62,7 +62,7 @@ class DMRG:
         Etot: The current total energy of the system
     """
     def __init__(self, NN_interaction=None):
-        """Initializes the DMRG object.
+        """Initializes the OGDMRG object.
 
         Args:
             NN_interaction: The nearest neighbour interaction.
@@ -293,8 +293,8 @@ class DMRG:
         X = (B @ B.T).reshape(self.M, self.p, self.M, self.p)
         self.HB += np.einsum('bicj,kilj->kblc', X, self.NN_interaction)
 
-    def OGDMRG(self, D=16, sites=2, max_iter=100, tol=1e-6, verbosity=2):
-        """Executing of the original DMRG algorithm.
+    def kernel(self, D=16, sites=2, max_iter=100, tol=1e-6, verbosity=2):
+        """Executing of the DMRG algorithm.
 
         Args:
             D: The bond dimension to use for DMRG. The algorithm can choose
@@ -360,6 +360,6 @@ if __name__ == '__main__':
     else:
         D = [16]
 
-    ogdmrg = DMRG()
+    ogdmrg = OGDMRG()
     for d in D:
-        ogdmrg.OGDMRG(D=d, max_iter=100, sites=4)
+        ogdmrg.kernel(D=d, max_iter=100, sites=4)
