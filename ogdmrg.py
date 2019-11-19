@@ -335,16 +335,10 @@ class OGDMRG:
                 try:
                     print(f"it {i}:\tM: {self.M},\tE: {self.E:.12f},\t"
                           f"ΔE: {ΔE:.3g},\ttrunc: {trunc:.3g},\t"
-                          f"A_diff {self.A_diff}"
-                          )
+                          f"A_diff {self.A_diff}")
                 except ValueError:
                     print(f"it {i}:\tM: {self.M},\tE: {self.E:.12f},\t"
-                          f"ΔE: {ΔE:.3g},\ttrunc: {trunc:.3g},\t"
-                          )
-            else:
-                print(f"it {i}:\tM: {self.M},\tE: {self.E:.12f},\t"
-                      f"ΔE: {ΔE:.3g},\ttrunc: {trunc:.3g},\t"
-                      )
+                          f"ΔE: {ΔE:.3g},\ttrunc: {trunc:.3g}")
         if verbosity >= 1:
             print(f"M: {self.M},\tE: {self.E:.12f},\t"
                   f"ΔE: {ΔE:.3g},\ttrunc: {trunc:.3g}")
