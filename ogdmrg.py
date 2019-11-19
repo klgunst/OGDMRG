@@ -342,7 +342,7 @@ class OGDMRG:
                     print(f"it {i}:\tM: {self.M},\tE: {self.E:.12f},\t"
                           f"ΔE: {ΔE:.3g},\ttrunc: {trunc:.3g}")
 
-            if abs(ΔE) < tol:
+            if tol is not None and abs(ΔE) < tol:
                 break
         if verbosity >= 1:
             print(f"its: {i},\tM: {self.M},\tE: {self.E:.12f},\t"
