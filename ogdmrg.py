@@ -20,15 +20,6 @@ def S_operators(multipl=2):
     return Sp, Sp.T, Sz
 
 
-def four_site(NN):
-    pd = NN.shape[0]
-    NN = NN.reshape(pd * pd, -1)
-    NN2 = 0.5 * np.kron(NN, np.eye(pd ** 2)).reshape((pd ** 2,) * 4)
-    NN2 += 0.5 * np.kron(np.eye(pd ** 2), NN).reshape((pd ** 2,) * 4)
-    NNtemp = np.kron(np.eye(pd), NN).reshape((pd ** 3,) * 2)
-    return (NN2 + np.kron(NNtemp, np.eye(pd)).reshape((pd ** 2,) * 4)) / 2
-
-
 def HeisenbergInteraction(multipl=2):
     """Returns Heisenberg interaction between two sites.
 
@@ -89,7 +80,7 @@ class OGDMRG:
             self.NN_interaction = NN_interaction
 
         self.HA = np.zeros((self.M, self.p, self.M, self.p))
-        self.HB = np.zeros((self.M, self.p, self.M, self.p))
+        self.HB = np.zeros((self.p, self.M, self.p, self.M))
         self.E = 0
         self.Etot = 0
 
@@ -114,28 +105,13 @@ class OGDMRG:
 
     @property
     def A(self):
-        """The current A-tensor.
+        """The current A-tensor (left canonical tensor).
 
         Internally it is stored as a deque of a certain length. The current
         A-tensor is the first element of the deque, previous A-tensors are the
         other elements of the deque.
         """
         return self._A_deque[0]
-
-    @property
-    def s(self):
-        return self._s_deque[0]
-
-    @s.setter
-    def s(self, s):
-        from collections import deque
-        # A deque is also initialized so to keep track of previous A's
-        try:
-            self._s_deque.appendleft(s)
-        except AttributeError:
-            # The deque is not initialized yet
-            self._s_deque = deque(maxlen=3)
-            self._s_deque.appendleft(s)
 
     @A.setter
     def A(self, A):
@@ -158,6 +134,42 @@ class OGDMRG:
         s_diag = np.diag(self._s_deque[0] * self._s_deque[-1])
         return np.linalg.norm(XX - s_diag)
 
+    @property
+    def B(self):
+        """The current B-tensor (right canonical tensor).
+
+        Internally it is stored as a deque of a certain length. The current
+        B-tensor is the first element of the deque, previous B-tensors are the
+        other elements of the deque.
+        """
+        return self._B_deque[0]
+
+    @B.setter
+    def B(self, B):
+        from collections import deque
+        # B deque is also initialized so to keep track of previous B's
+        try:
+            self._B_deque.appendleft(B)
+        except AttributeError:
+            # The deque is not initialized yet
+            self._B_deque = deque(maxlen=3)
+            self._B_deque.appendleft(B)
+
+    @property
+    def s(self):
+        return self._s_deque[0]
+
+    @s.setter
+    def s(self, s):
+        from collections import deque
+        # A deque is also initialized so to keep track of previous A's
+        try:
+            self._s_deque.appendleft(s)
+        except AttributeError:
+            # The deque is not initialized yet
+            self._s_deque = deque(maxlen=3)
+            self._s_deque.appendleft(s)
+
     def Heff(self, x):
         """Executing the Effective Hamiltonian on the two-site object `x`.
 
@@ -169,23 +181,31 @@ class OGDMRG:
         Returns H_A * x.
         """
         x = x.reshape(self.M * self.p, -1)
-        # Interactions between left environment and left site
-        result = self.HA.reshape(self.M * self.p, -1) @ x
-        # Interactions between right environment and right site
-        result += x @ self.HB.reshape(self.M * self.p, -1)
-        # Interactions between left and right site
-        x = x.reshape(self.M, self.p, self.M, self.p)
-        result = result.reshape(self.M, self.p, self.M, self.p)
-        result += np.einsum('xyij,lirj->lxry', self.NN_interaction, x)
+        # Interactions between left environment and leftmost site
+        result = (self.HA.reshape(self.M * self.p, -1) @ x).ravel()
 
+        # Interactions between right environment and rightmost site
+        x = x.reshape(-1, self.M * self.p)
+        result += (x @ self.HB.reshape(self.p * self.M, -1).T).ravel()
+
+        # Interactions between current sites
+        for i in range(self.nrsites - 1):
+            newshape = (
+                self.M * self.p ** i,
+                self.p, self.p,
+                self.p ** (self.nrsites - i - 2) * self.M
+            )
+            result = result.reshape(newshape)
+            x = x.reshape(newshape)
+            result += np.einsum('xyij,lijr->lxyr', self.NN_interaction, x)
         return result.ravel()
 
     def renormalize_basis(self, A2, D, tol=1e-10):
         """Renormalize the basis.
         """
         from numpy.linalg import svd, qr
-
-        u, s, v = svd(A2.reshape((self.M * self.p, self.M * self.p)))
+        hsites = self.nrsites // 2
+        u, s, v = svd(A2.reshape((self.M * self.p ** hsites,) * 2))
         svd_diff = (s[:-1] - s[1:]) / s[:-1]
 
         # Array with Trues every time this singular value is different than the
@@ -219,8 +239,8 @@ class OGDMRG:
 
             v[begin:end, :] = Q.T @ v[begin:end, :]
 
-        self.B = v.T.reshape(self.M, self.p, -1)
-        self.A = u.reshape(self.M, self.p, -1)
+        self.B = v.reshape(D, *(self.p,) * hsites, self.M)
+        self.A = u.reshape(self.M, *(self.p,) * hsites, D)
         self.s = s[:D]
 
         return s[D:] @ s[D:]
@@ -228,10 +248,24 @@ class OGDMRG:
     def update_Heff(self):
         """Update the effective Hamiltonian for the new renormalized basis.
         """
-        Mp = self.A.shape[0] * self.A.shape[1]
+        # Left environment update
+        oldM = self.A.shape[0]
+        hsites = self.nrsites // 2
+        ptot = self.p ** hsites
+        Mp = oldM * self.p
 
         A = self.A.reshape(Mp, -1)
-        tH = A.T @ self.HA.reshape(Mp, Mp) @ A
+        tH = (self.HA.reshape(Mp, Mp) @ A).reshape(oldM * ptot, self.M)
+        tH = self.A.reshape(oldM * ptot, self.M).T @ tH
+        for i in range(hsites - 1):
+            newshape = (
+                oldM * self.p ** i,
+                self.p, self.p,
+                self.p ** (hsites - i - 2) * self.M
+            )
+            tA = np.einsum('xyij,lijr->lxyr', self.NN_interaction,
+                           self.A.reshape(newshape))
+            tH += self.A.reshape(-1, self.M).T @ tA.reshape(-1, self.M)
         self.HA = np.kron(tH, np.eye(self.p))
         self.HA = self.HA.reshape(self.M, self.p, self.M, self.p)
 
@@ -239,23 +273,35 @@ class OGDMRG:
         X = (A.T @ A).reshape(self.p, self.M, self.p, self.M)
         self.HA += np.einsum('ibjc,ikjl->bkcl', X, self.NN_interaction)
 
-        Mp = self.B.shape[0] * self.B.shape[1]
-        B = self.B.reshape(Mp, -1)
-        tH = B.T @ self.HB.reshape(Mp, Mp) @ B
-        self.HB = np.kron(tH, np.eye(self.p))
-        self.HB = self.HB.reshape(self.M, self.p, self.M, self.p)
+        # Right environment update
+        B = self.B.reshape(-1, Mp)
+        tH = (B @ self.HB.reshape(Mp, Mp).T).reshape(self.M, oldM * ptot)
+        tH = tH @ self.B.reshape(self.M, oldM * ptot).T
+        for i in range(hsites - 1):
+            newshape = (
+                self.M * self.p ** i,
+                self.p, self.p,
+                self.p ** (hsites - i - 2) * oldM
+            )
+            tB = np.einsum('xyij,lijr->lxyr', self.NN_interaction,
+                           self.B.reshape(newshape))
+            tH += self.B.reshape(self.M, -1) @ tB.reshape(self.M, -1).T
+        self.HB = np.kron(np.eye(self.p), tH)
+        self.HB = self.HB.reshape(self.p, self.M, self.p, self.M)
 
-        B = self.B.reshape(-1, self.p * self.M)
-        X = (B.T @ B).reshape(self.p, self.M, self.p, self.M)
-        self.HB += np.einsum('ibjc,kilj->bkcl', X, self.NN_interaction)
+        B = self.B.reshape(self.M * self.p, -1)
+        X = (B @ B.T).reshape(self.M, self.p, self.M, self.p)
+        self.HB += np.einsum('bicj,kilj->kblc', X, self.NN_interaction)
 
-    def kernel(self, D=16, max_iter=100, verbosity=2):
+    def kernel(self, D=16, max_iter=100, verbosity=2, sites=2):
         """Executing of the DMRG algorithm.
 
         Args:
             D: The bond dimension to use for DMRG. The algorithm can choose
             a bond dimension larger than the one specified to avoid truncating
             between renormalized states degenerate in their singular values.
+
+            sites: The number of sites to add each step
 
             max_iter: The maximal iterations to use in the DMRG algorithm.
 
@@ -264,10 +310,16 @@ class OGDMRG:
                        2: Print intermediate result at every even chain length.
         """
         from scipy.sparse.linalg import eigsh, LinearOperator
+        if sites % 2 != 0:
+            raise ValueError('Number of sites needs to be even')
+
+        self.nrsites = sites
 
         for i in range(max_iter):
-            H = LinearOperator(((self.M * self.p) ** 2,) * 2,
-                               matvec=lambda x: self.Heff(x))
+            H = LinearOperator(
+                (self.M * self.M * (self.p ** self.nrsites),) * 2,
+                matvec=lambda x: self.Heff(x)
+            )
             # Diagonalize
             w, v = eigsh(H, k=1, which='SA')
             # Renormalize the basis
@@ -276,7 +328,7 @@ class OGDMRG:
             self.update_Heff()
 
             # Energy difference between this and the previous even-length chain
-            E = (w[0] - self.Etot) / 2
+            E = (w[0] - self.Etot) / self.nrsites
             ΔE, self.E, self.Etot = self.E - E, E, w[0]
 
             if verbosity >= 2:
@@ -307,7 +359,7 @@ if __name__ == '__main__':
     else:
         D = [16]
 
-    ogdmrg = OGDMRG(NN_interaction=four_site(HeisenbergInteraction()))
-
+    ogdmrg = OGDMRG()
     for d in D:
-        ogdmrg.kernel(D=d, max_iter=1000)
+        for sites in [2, 4]:
+            ogdmrg.kernel(D=d, max_iter=100, sites=sites)
