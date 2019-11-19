@@ -293,7 +293,7 @@ class OGDMRG:
         X = (B @ B.T).reshape(self.M, self.p, self.M, self.p)
         self.HB += np.einsum('bicj,kilj->kblc', X, self.NN_interaction)
 
-    def kernel(self, D=16, max_iter=100, verbosity=2, sites=2):
+    def kernel(self, D=16, sites=2, max_iter=100, tol=1e-6, verbosity=2):
         """Executing of the DMRG algorithm.
 
         Args:
@@ -304,6 +304,8 @@ class OGDMRG:
             sites: The number of sites to add each step
 
             max_iter: The maximal iterations to use in the DMRG algorithm.
+
+            tol: The Energy tolerance on which to abort the calculation
 
             verbosity: 0: Don't print anything.
                        1: Print results for the optimization.
@@ -339,9 +341,14 @@ class OGDMRG:
                 except ValueError:
                     print(f"it {i}:\tM: {self.M},\tE: {self.E:.12f},\t"
                           f"ΔE: {ΔE:.3g},\ttrunc: {trunc:.3g}")
+
+            if abs(ΔE) < tol:
+                break
         if verbosity >= 1:
-            print(f"M: {self.M},\tE: {self.E:.12f},\t"
+            print(f"its: {i},\tM: {self.M},\tE: {self.E:.12f},\t"
                   f"ΔE: {ΔE:.3g},\ttrunc: {trunc:.3g}")
+            if i == max_iter:
+                print("Convergence not reached.")
 
         return self.E
 
@@ -355,5 +362,4 @@ if __name__ == '__main__':
 
     ogdmrg = OGDMRG()
     for d in D:
-        for sites in [2, 4]:
-            ogdmrg.kernel(D=d, max_iter=100, sites=sites)
+        ogdmrg.kernel(D=d, max_iter=100, sites=4)
