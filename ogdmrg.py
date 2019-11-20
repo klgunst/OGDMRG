@@ -485,31 +485,32 @@ class VUMPS:
             Alc = (Al.reshape(-1, self.M) @ c).ravel()
             diff = norm(cAr - Alc)
 
-            if False and diff < 1e-7 and iterations % 3 == 0:
+            if False and iterations > 100 and iterations % 3 == 0:
+                # Does not work
+                def AlAr(x):
+                    Alx = Al.reshape(-1, self.M) @ x.reshape(self.M, self.M)
+                    return (Alx.reshape(self.M, -1) @
+                            Ar.reshape(self.M, -1).conj().T).ravel()
+
                 # every third iteration solve eigenvalue problem
-                AlAr = LinearOperator(
+                LO = LinearOperator(
                     (c.size,) * 2,
-                    matvec=lambda x:
-                    (Al.reshape(-1, self.M) @
-                     x.reshape(self.M, self.M)).reshape(self.M, -1) @
-                    Ar.reshape(self.M, -1).T
+                    matvec=AlAr,
+                    dtype=complex128
                 )
-                AlAr = np.einsum('ijk,ajl->ailk',
-                                 Al.reshape(self.M, self.p, self.M),
-                                 Ar.reshape(self.M, self.p, self.M)).reshape(
-                                     self.M * self.M, -1)
 
-                w, v = eigs(AlAr, v0=c.ravel(), k=1, which='LR')
-                print('bla', norm(c.ravel() - v[:, 0].real),
-                      norm(c.ravel() + v[:, 0].real))
-                c = v[:, 0].real.reshape(self.M, self.M)
+                print('norm:', np.dot(c.ravel().conj(), AlAr(c).ravel()),
+                      np.abs(1 - np.dot(c.ravel().conj(), AlAr(c).ravel())))
+                w, v = eigs(LO, v0=c.ravel(), k=1, which='LR')
+                co = c
+                # c = polar(v[:, 0].reshape(self.M, self.M))[1]
+                c = v[:, 0].reshape(self.M, -1)
+                # c = (c + c.T) * (-1 if np.trace(c) < 0 else 1)
                 cAr = c @ Ar.reshape(self.M, -1)
-                # Al, c = polar(cAr.reshape(self.M * self.p, -1))
 
-                cAr = (c @ Ar.reshape(self.M, -1)).ravel()
                 Alc = (Al.reshape(-1, self.M) @ c).ravel()
-                diff = norm(cAr - Alc)
-                print(w[0], diff, norm(cAr + Alc))
+                diff = norm(cAr.ravel() - Alc)
+                print(w[0], np.abs(1 - w[0]), diff, np.linalg.norm(c - co))
 
         # renormalize c to be sure
         return Al, c / norm(c), (iterations, diff)
@@ -677,6 +678,7 @@ if __name__ == '__main__':
     ogdmrg = OGDMRG(NN_interaction=IsingInteraction())
     vumps = VUMPS(NN_interaction=four_site(IsingInteraction(J=3.8)))
     vumps = VUMPS(NN_interaction=four_site(HeisenbergInteraction()))
+    vumps = VUMPS(NN_interaction=IsingInteraction())
     for d in D:
         vumps.kernel(D=d, max_iter=100)
         exit(0)
