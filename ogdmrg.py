@@ -1,6 +1,19 @@
 import numpy as np
 
 
+def four_site(NN):
+    """Transforms the two site interaction to an equivalent four-site
+    interaction such that we can do `two site` optimization which is actually
+    four sites in a time.
+    """
+    pd = NN.shape[0]
+    NN = NN.reshape(pd * pd, -1)
+    NN2 = 0.5 * np.kron(NN, np.eye(pd ** 2)).reshape((pd ** 2,) * 4)
+    NN2 += 0.5 * np.kron(np.eye(pd ** 2), NN).reshape((pd ** 2,) * 4)
+    NNtemp = np.kron(np.eye(pd), NN).reshape((pd ** 3,) * 2)
+    return (NN2 + np.kron(NNtemp, np.eye(pd)).reshape((pd ** 2,) * 4)) / 2
+
+
 def S_operators(multipl=2):
     """Returns the S+, S-, and Sz operators in for a spin.
     The operators are represented in the Sz basis: (-j, -j + 1, ..., j)
@@ -57,7 +70,7 @@ class OGDMRG:
     """
     Attributes:
         NN_interaction: The Nearest neighbour interaction for the hamiltonian
-        HA: The current effective Hamiltonian
+        HL: The current effective Hamiltonian
         E: The current energy per site
         Etot: The current total energy of the system
     """
@@ -79,8 +92,8 @@ class OGDMRG:
         else:
             self.NN_interaction = NN_interaction
 
-        self.HA = np.zeros((self.M, self.p, self.M, self.p))
-        self.HB = np.zeros((self.p, self.M, self.p, self.M))
+        self.HL = np.zeros((self.M, self.p, self.M, self.p))
+        self.HR = np.zeros((self.p, self.M, self.p, self.M))
         self.E = 0
         self.Etot = 0
 
@@ -182,11 +195,11 @@ class OGDMRG:
         """
         x = x.reshape(self.M * self.p, -1)
         # Interactions between left environment and leftmost site
-        result = (self.HA.reshape(self.M * self.p, -1) @ x).ravel()
+        result = (self.HL.reshape(self.M * self.p, -1) @ x).ravel()
 
         # Interactions between right environment and rightmost site
         x = x.reshape(-1, self.M * self.p)
-        result += (x @ self.HB.reshape(self.p * self.M, -1).T).ravel()
+        result += (x @ self.HR.reshape(self.p * self.M, -1).T).ravel()
 
         # Interactions between current sites
         for i in range(self.nrsites - 1):
@@ -255,7 +268,7 @@ class OGDMRG:
         Mp = oldM * self.p
 
         A = self.A.reshape(Mp, -1)
-        tH = (self.HA.reshape(Mp, Mp) @ A).reshape(oldM * ptot, self.M)
+        tH = (self.HL.reshape(Mp, Mp) @ A).reshape(oldM * ptot, self.M)
         tH = self.A.reshape(oldM * ptot, self.M).T @ tH
         for i in range(hsites - 1):
             newshape = (
@@ -266,16 +279,16 @@ class OGDMRG:
             tA = np.einsum('xyij,lijr->lxyr', self.NN_interaction,
                            self.A.reshape(newshape))
             tH += self.A.reshape(-1, self.M).T @ tA.reshape(-1, self.M)
-        self.HA = np.kron(tH, np.eye(self.p))
-        self.HA = self.HA.reshape(self.M, self.p, self.M, self.p)
+        self.HL = np.kron(tH, np.eye(self.p))
+        self.HL = self.HL.reshape(self.M, self.p, self.M, self.p)
 
         A = self.A.reshape(-1, self.p * self.M)
         X = (A.T @ A).reshape(self.p, self.M, self.p, self.M)
-        self.HA += np.einsum('ibjc,ikjl->bkcl', X, self.NN_interaction)
+        self.HL += np.einsum('ibjc,ikjl->bkcl', X, self.NN_interaction)
 
         # Right environment update
         B = self.B.reshape(-1, Mp)
-        tH = (B @ self.HB.reshape(Mp, Mp).T).reshape(self.M, oldM * ptot)
+        tH = (B @ self.HR.reshape(Mp, Mp).T).reshape(self.M, oldM * ptot)
         tH = tH @ self.B.reshape(self.M, oldM * ptot).T
         for i in range(hsites - 1):
             newshape = (
@@ -286,12 +299,12 @@ class OGDMRG:
             tB = np.einsum('xyij,lijr->lxyr', self.NN_interaction,
                            self.B.reshape(newshape))
             tH += self.B.reshape(self.M, -1) @ tB.reshape(self.M, -1).T
-        self.HB = np.kron(np.eye(self.p), tH)
-        self.HB = self.HB.reshape(self.p, self.M, self.p, self.M)
+        self.HR = np.kron(np.eye(self.p), tH)
+        self.HR = self.HR.reshape(self.p, self.M, self.p, self.M)
 
         B = self.B.reshape(self.M * self.p, -1)
         X = (B @ B.T).reshape(self.M, self.p, self.M, self.p)
-        self.HB += np.einsum('bicj,kilj->kblc', X, self.NN_interaction)
+        self.HR += np.einsum('bicj,kilj->kblc', X, self.NN_interaction)
 
     def kernel(self, D=16, sites=2, max_iter=100, tol=1e-6, verbosity=2):
         """Executing of the DMRG algorithm.
@@ -353,6 +366,170 @@ class OGDMRG:
         return self.E
 
 
+class VUMPS:
+    """
+    Attributes:
+        NN_interaction: The Nearest neighbour interaction for the hamiltonian
+    """
+    def __init__(self, NN_interaction=None):
+        """Initializes the VUMPS object.
+
+        Args:
+            NN_interaction: The nearest neighbour interaction.
+
+            If None assume Heisenberg interaction.
+
+            This can also be set to a tensor representing the NN interaction.
+
+            For more information how the passed NN interaction should be
+            structured, see the HeisenbergInteraction function.
+        """
+        if NN_interaction is None:
+            self.NN_interaction = HeisenbergInteraction()
+        else:
+            self.NN_interaction = NN_interaction
+
+    @property
+    def p(self):
+        """The dimension of the local physical basis.
+        """
+        assert len(self.NN_interaction.shape) == 4
+        return self.NN_interaction.shape[0]
+
+    def HAc(self, x):
+        # left Heff
+        result = (self.Hl @ x.reshape(self.M, -1)).ravel()
+        # right Heff
+        result += (x.reshape(-1, self.M) @ self.Hr.T).ravel()
+
+        # first onsite
+        LL = self.Al.reshape(-1, self.M) @ x.reshape(self.M, -1)
+        LL = np.einsum('lijr,xyij->lxyr',
+                       LL.reshape(self.M, self.p, self.p, self.M),
+                       self.NN_interaction
+                       )
+        result += (self.Al.reshape(self.M * self.p, -1).T @
+                   LL.reshape(self.M * self.p, -1)).ravel()
+
+        # second onsite
+        RR = x.reshape(-1, self.M) @ self.Ar.reshape(self.M, -1)
+        RR = np.einsum('lijr,xyij->lxyr',
+                       RR.reshape(self.M, self.p, self.p, self.M),
+                       self.NN_interaction
+                       )
+        result += (RR.reshape(-1, self.M * self.p) @
+                   self.Ar.reshape(-1, self.M * self.p).T).ravel()
+        return result
+
+    def Hc(self, x):
+        x = x.reshape(self.M, self.M)
+        # left Heff
+        result = (self.Hl @ x).ravel()
+        # right Heff
+        result += (x @ self.Hr.T).ravel()
+
+        # On site
+        C1 = self.Al.reshape(-1, self.M) @ x @ self.Ar.reshape(self.M, -1)
+        C2 = np.einsum('lijr,xyij->lxyr',
+                       C1.reshape(self.M, self.p, self.p, self.M),
+                       self.NN_interaction
+                       )
+        C3 = C2.reshape(-1, self.p * self.M) @ \
+            self.Ar.reshape(-1, self.p * self.M).T
+        result += (self.Al.reshape(self.M * self.p, -1).T @
+                   C3.reshape(self.p * self.M, -1)).ravel()
+        return result
+
+    def MakeHeffLeft(self):
+        from scipy.sparse.linalg import bicgstab, LinearOperator
+
+        All = self.Al.reshape(-1, self.M) @ self.Al.reshape(self.M, -1)
+        Hall = np.einsum('lijr,xyij->lxyr',
+                         All.reshape(self.M, self.p, self.p, self.M),
+                         self.NN_interaction
+                         )
+        hl = All.reshape(-1, self.M).T @ Hall.reshape(-1, self.M)
+        e = np.trace(self.c.T @ hl @ self.c) * np.eye(self.M)
+
+        def Afunc(x):
+            x = x.reshape(self.M, self.M)
+            res = (np.trace(self.c.T @ x @ self.c) * np.eye(self.M)).ravel()
+            res += x.ravel()
+            self.Al = self.Al.reshape(self.M, self.p, self.M)
+            res -= np.einsum('ij,jpa,ipb->ba', x, self.Al, self.Al).ravel()
+            return res
+
+        A = LinearOperator((self.M * self.M,) * 2, matvec=Afunc)
+        r, info = bicgstab(A, (hl - e).ravel())
+        print(info)
+        return r.reshape(self.M, self.M)
+
+    def MakeHeffRight(self):
+        from scipy.sparse.linalg import bicgstab, LinearOperator
+
+        Arr = self.Ar.reshape(-1, self.M) @ self.Ar.reshape(self.M, -1)
+        Harr = np.einsum('lijr,xyij->lxyr',
+                         Arr.reshape(self.M, self.p, self.p, self.M),
+                         self.NN_interaction
+                         )
+        hr = Arr.reshape(self.M, -1) @ Harr.reshape(self.M, -1).T
+        e = np.trace(self.c @ hr @ self.c.T) * np.eye(self.M)
+
+        def Afunc(x):
+            x = x.reshape(self.M, self.M)
+            res = (np.trace(self.c @ x @ self.c.T) * np.eye(self.M)).ravel()
+            res += x.ravel()
+            self.Ar = self.Ar.reshape(self.M, self.p, self.M)
+            res -= np.einsum('ij,apj,bpi->ba', x, self.Ar, self.Ar).ravel()
+            return res
+
+        A = LinearOperator((self.M * self.M,) * 2, matvec=Afunc)
+        r, info = bicgstab(A, (hr - e).ravel())
+        print(info)
+        return r.reshape(self.M, self.M)
+
+    def kernel(self, D=16, max_iter=100, tol=1e-6, verbosity=2):
+        from scipy.sparse.linalg import eigsh, LinearOperator
+        from scipy.linalg import polar
+        from numpy.random import rand
+        self.M = D
+
+        Ac = rand(self.M, self.p, self.M)
+
+        ual, pal = polar(Ac.reshape(-1, self.M), side='right')
+        self.c = pal
+
+        uar, par = polar(Ac.reshape(self.M, -1), side='left')
+        ucl, pcl = polar(self.c, side='right')
+        ucr, pcr = polar(self.c, side='left')
+        self.Al, self.Ar = ual @ ucl.T, ucr.T @ uar
+
+        for i in range(max_iter):
+            self.Hl = self.MakeHeffLeft()
+            self.Hr = self.MakeHeffRight()
+
+            HAc = LinearOperator(
+                (self.M * self.M * self.p,) * 2,
+                matvec=lambda x: self.HAc(x)
+            )
+            Hc = LinearOperator(
+                (self.M * self.M,) * 2, matvec=lambda x: self.Hc(x)
+            )
+            # Solve the two eigenvalues problem for Ac and c
+            w1, v1 = eigsh(HAc, k=1, which='SA')
+            w2, v2 = eigsh(Hc, k=1, which='SA')
+            print(f'HAc: {w1[0] / 2}, Hc: {w2[0]}')
+
+            Ac = v1[:, 0].reshape(self.M, self.p, self.M)
+            self.c = v2[:, 0].reshape(self.M, self.M)
+
+            ual, pal = polar(Ac.reshape(-1, self.M), side='right')
+            uar, par = polar(Ac.reshape(self.M, -1), side='left')
+            ucl, pcl = polar(self.c, side='right')
+            ucr, pcr = polar(self.c, side='left')
+            self.Al, self.Ar = ual @ ucl.T, ucr.T @ uar
+
+
 if __name__ == '__main__':
     from sys import argv
     if len(argv) > 1:
@@ -360,6 +537,10 @@ if __name__ == '__main__':
     else:
         D = [16]
 
-    ogdmrg = OGDMRG()
+    ogdmrg = OGDMRG(NN_interaction=IsingInteraction())
+    vumps = VUMPS(NN_interaction=IsingInteraction())
+    vumps = VUMPS(NN_interaction=four_site(HeisenbergInteraction()))
     for d in D:
-        ogdmrg.kernel(D=d, max_iter=100, sites=4)
+        vumps.kernel(D=d, max_iter=1000)
+        exit(0)
+        ogdmrg.kernel(D=d, max_iter=1000, sites=2, tol=None)
