@@ -1,4 +1,5 @@
 import numpy as np
+from numpy import complex128
 
 
 def four_site(NN):
@@ -443,14 +444,14 @@ class VUMPS:
 
     @property
     def energy(self):
-        return np.dot(self.c.ravel(), self.Hc(self.c))
+        return np.dot(self.c.ravel().conj(), self.Hc(self.c)).real
 
     @property
     def err(self):
         HAcAc = self.HAc(self.Ac)
         Hcc = self.Hc(self.c)
         AlHcc = (self.Al.reshape(-1, self.M) @ Hcc.reshape(self.M, -1)).ravel()
-        return np.linalg.norm(HAcAc - 2 * AlHcc) / abs(self.energy)
+        return np.linalg.norm(HAcAc - 2 * AlHcc) / (2 * abs(self.energy))
 
     def H_2site(self, AA):
         """Executes the nearest neighbour interaction on a two-site tensor
@@ -467,6 +468,7 @@ class VUMPS:
         """
         from numpy.linalg import norm
         from scipy.linalg import polar
+        from scipy.sparse.linalg import eigs, LinearOperator
         from numpy.random import rand
 
         # Initial guess for c
@@ -475,14 +477,39 @@ class VUMPS:
 
         iterations = 0
         diff = None
+        cAr = c @ Ar.reshape(self.M, -1)
         while diff is None or diff > tol:
             iterations += 1
-            cAr = c @ Ar.reshape(self.M, -1)
             Al, c = polar(cAr.reshape(self.M * self.p, -1))
-
             cAr = (c @ Ar.reshape(self.M, -1)).ravel()
             Alc = (Al.reshape(-1, self.M) @ c).ravel()
             diff = norm(cAr - Alc)
+
+            if False and diff < 1e-7 and iterations % 3 == 0:
+                # every third iteration solve eigenvalue problem
+                AlAr = LinearOperator(
+                    (c.size,) * 2,
+                    matvec=lambda x:
+                    (Al.reshape(-1, self.M) @
+                     x.reshape(self.M, self.M)).reshape(self.M, -1) @
+                    Ar.reshape(self.M, -1).T
+                )
+                AlAr = np.einsum('ijk,ajl->ailk',
+                                 Al.reshape(self.M, self.p, self.M),
+                                 Ar.reshape(self.M, self.p, self.M)).reshape(
+                                     self.M * self.M, -1)
+
+                w, v = eigs(AlAr, v0=c.ravel(), k=1, which='LR')
+                print('bla', norm(c.ravel() - v[:, 0].real),
+                      norm(c.ravel() + v[:, 0].real))
+                c = v[:, 0].real.reshape(self.M, self.M)
+                cAr = c @ Ar.reshape(self.M, -1)
+                # Al, c = polar(cAr.reshape(self.M * self.p, -1))
+
+                cAr = (c @ Ar.reshape(self.M, -1)).ravel()
+                Alc = (Al.reshape(-1, self.M) @ c).ravel()
+                diff = norm(cAr - Alc)
+                print(w[0], diff, norm(cAr + Alc))
 
         # renormalize c to be sure
         return Al, c / norm(c), (iterations, diff)
@@ -497,7 +524,7 @@ class VUMPS:
         LL = self.Al.reshape(-1, self.M) @ x.reshape(self.M, -1)
         LL = self.H_2site(LL)
 
-        result += (self.Al.reshape(self.M * self.p, -1).T @
+        result += (self.Al.reshape(self.M * self.p, -1).conj().T @
                    LL.reshape(self.M * self.p, -1)).ravel()
 
         # second onsite
@@ -505,7 +532,7 @@ class VUMPS:
         RR = self.H_2site(RR)
 
         result += (RR.reshape(-1, self.M * self.p) @
-                   self.Ar.reshape(-1, self.M * self.p).T).ravel()
+                   self.Ar.reshape(-1, self.M * self.p).conj().T).ravel()
         return result
 
     def Hc(self, x):
@@ -520,19 +547,19 @@ class VUMPS:
         C1 = self.H_2site(C1)
 
         C3 = C1.reshape(-1, self.p * self.M) @ \
-            self.Ar.reshape(-1, self.p * self.M).T
-        result += (self.Al.reshape(self.M * self.p, -1).T @
+            self.Ar.reshape(-1, self.p * self.M).conj().T
+        result += (self.Al.reshape(self.M * self.p, -1).conj().T @
                    C3.reshape(self.p * self.M, -1)).ravel()
         return result
 
     def MakeHeff(self, A, c, tol=1e-14):
-        from scipy.sparse.linalg import bicgstab, LinearOperator
+        from scipy.sparse.linalg import LinearOperator, bicgstab
 
         def P_NullSpace(x):
             """Projecting x on the nullspace of 1 - T
             """
             x = x.reshape(self.M, self.M)
-            return np.trace(c.T @ x @ c) * np.eye(self.M)
+            return np.trace(c.conj().T @ x @ c) * np.eye(self.M)
 
         def Transfer(x):
             """Executing (1 - (T - P)) @ x
@@ -540,15 +567,22 @@ class VUMPS:
             x = x.reshape(self.M, self.M)
             res = x.ravel().copy()
             res += P_NullSpace(x).ravel()
-            res -= np.einsum('ij,jpa,ipb->ba', x, A, A).ravel()
+            temp = x @ A.reshape(self.M, -1)
+            res -= (A.reshape(-1, self.M).conj().T @
+                    temp.reshape(-1, self.M)).ravel()
+
             return res
 
         AA = A.reshape(-1, self.M) @ A.reshape(self.M, -1)
         HAA = self.H_2site(AA)
 
-        h = AA.reshape(-1, self.M).T @ HAA.reshape(-1, self.M)
+        h = AA.reshape(-1, self.M).conj().T @ HAA.reshape(-1, self.M)
 
-        LO = LinearOperator((self.M * self.M,) * 2, matvec=Transfer)
+        LO = LinearOperator((self.M * self.M,) * 2,
+                            matvec=Transfer,
+                            dtype=complex128
+                            )
+
         r, info = bicgstab(LO, (h - P_NullSpace(h)).ravel(), tol=tol)
 
         # return (1 - P) @ result
@@ -559,23 +593,21 @@ class VUMPS:
         return self.MakeHeff(self.Al, self.c, tol)
 
     def MakeHr(self, tol):
-        self.NN_interaction = self.NN_interaction.transpose()
-        res = self.MakeHeff(self.Ar.transpose(), self.c.T, tol)
-        self.NN_interaction = self.NN_interaction.transpose()
-        return res
+        self.NN_interaction = self.NN_interaction.conj().transpose()
+        res = self.MakeHeff(self.Ar.conj().transpose(), self.c.conj().T, tol)
+        self.NN_interaction = self.NN_interaction.conj().transpose()
+        return res[0], res[1]
 
     def kernel(self, D=16, max_iter=100, tol=1e-12, verbosity=2):
         from scipy.sparse.linalg import eigsh, LinearOperator
         from scipy.linalg import polar
         from numpy.random import rand
-        from numpy.linalg import qr
 
         self.M = D
-
         # Random initial guess
-        self.Ar = qr(rand(self.M, self.p * self.M).T)[0].T
+        self.Ar = polar(rand(self.M, self.p * self.M), side='left')[0]
         c = None
-        ctol = 1e-3
+        ctol, err = 1e-3, 1e-3
 
         for i in range(max_iter):
             self.Al, self.c, canon_info = \
@@ -589,15 +621,18 @@ class VUMPS:
             if Hr_info != 0:
                 print(f'Making of right environ gave {Hr_info} as exit code')
 
-            ctol = max(min(1e-14, 1e-3 * self.err), 1e-14)
+            ctol = max(min(1e-8, 1e-3 * err), 1e-14)
+            ctol = 1e-14
 
             HAc = LinearOperator(
                 (self.M * self.M * self.p,) * 2,
-                matvec=lambda x: self.HAc(x)
+                matvec=lambda x: self.HAc(x),
+                dtype=complex128
             )
             Hc = LinearOperator(
                 (self.M * self.M,) * 2,
-                matvec=lambda x: self.Hc(x)
+                matvec=lambda x: self.Hc(x),
+                dtype=complex128
             )
 
             # Solve the two eigenvalues problem for Ac and c
@@ -606,15 +641,14 @@ class VUMPS:
 
             uar, _ = polar(v1[:, 0].reshape(self.M, -1), side='left')
             ucr, _ = polar(v2[:, 0].reshape(self.M, self.M), side='left')
-            self.Ar = ucr.T @ uar
+            self.Ar = ucr.conj().T @ uar
+            err = self.err
 
-            if self.err < tol:
-                break
             if verbosity >= 2:
                 print(
                     f'it: {i},\t'
                     f'E: {self.energy:.16g},\t'
-                    f'Error: {self.err:.3g},\t'
+                    f'Error: {err:.3g},\t'
                     f'tol: {ctol:.3g},\t'
                     f'HAc: {w1[0]:.6g},\t'
                     f'Hc: {w2[0]:.6g},\t'
@@ -625,7 +659,7 @@ class VUMPS:
             print(
                 f'it: {i},\t'
                 f'E: {self.energy:.16g},\t'
-                f'Error: {self.err:.3g}\t'
+                f'Error: {err:.3g}\t'
                 f'tol: {ctol:.3g},\t'
                 f'HAc: {w1[0]:.6g},\t'
                 f'Hc: {w2[0]:.6g},\t'
@@ -641,9 +675,9 @@ if __name__ == '__main__':
         D = [16]
 
     ogdmrg = OGDMRG(NN_interaction=IsingInteraction())
-    vumps = VUMPS(NN_interaction=IsingInteraction(J=3.8))
+    vumps = VUMPS(NN_interaction=four_site(IsingInteraction(J=3.8)))
     vumps = VUMPS(NN_interaction=four_site(HeisenbergInteraction()))
     for d in D:
-        vumps.kernel(D=d, max_iter=50)
+        vumps.kernel(D=d, max_iter=100)
         exit(0)
         ogdmrg.kernel(D=d, max_iter=1000, sites=2, tol=None)
