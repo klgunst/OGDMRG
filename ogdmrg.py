@@ -1,5 +1,6 @@
 import numpy as np
 from numpy import complex128
+from numpy.random import rand
 from numpy.linalg import norm
 from scipy.linalg import polar
 from scipy.sparse.linalg import eigs, bicgstab, eigsh, LinearOperator
@@ -444,16 +445,12 @@ class VUMPS:
             self._Ac = self.c @ self.Ar.reshape(self.M, -1)
         return self._Ac.reshape(self.M, self.p, self.M)
 
-    @property
-    def energy(self):
-        return np.dot(self.c.ravel().conj(), self.Hc(self.c)).real
-
-    @property
-    def err(self):
+    def current_energy_and_error(self):
         HAcAc = self.HAc(self.Ac)
         Hcc = self.Hc(self.c)
+        E = np.dot(self.c.ravel().conj(), Hcc.ravel()).real
         AlHcc = (self.Al.reshape(-1, self.M) @ Hcc.reshape(self.M, -1)).ravel()
-        return norm(HAcAc - 2 * AlHcc) / (2 * abs(self.energy))
+        return E, norm(HAcAc - 2 * AlHcc) / (2 * abs(E))
 
     def H_2site(self, AA):
         """Executes the nearest neighbour interaction on a two-site tensor
@@ -468,8 +465,6 @@ class VUMPS:
 
         Solve Al @ c = c @ Ar subsequent QR decomposition
         """
-        from numpy.random import rand
-
         # Initial guess for c
         c = rand(self.M, self.M) if c_in is None else c_in
         c = c / norm(c)
@@ -560,7 +555,7 @@ class VUMPS:
             return np.trace(c.conj().T @ x @ c) * np.eye(self.M)
 
         def Transfer(x):
-            """Executing (1 - (T - P)) @ x
+            """Doing (1 - (T - P)) @ x
             """
             x = x.reshape(self.M, self.M)
             res = x.ravel().copy()
@@ -588,54 +583,60 @@ class VUMPS:
         return r - P_NullSpace(r), info
 
     def MakeHl(self, tol):
-        return self.MakeHeff(self.Al, self.c, tol)
+        result, info = self.MakeHeff(self.Al, self.c, tol)
+        if info != 0:
+            print(f'Making left environment gave {info} as exit code')
+        return result, info
 
     def MakeHr(self, tol):
         self.NN_interaction = self.NN_interaction.conj().transpose()
-        res = self.MakeHeff(self.Ar.conj().transpose(), self.c.conj().T, tol)
+        result, info = \
+            self.MakeHeff(self.Ar.conj().transpose(), self.c.conj().T, tol)
         self.NN_interaction = self.NN_interaction.conj().transpose()
-        return res[0], res[1]
+        if info != 0:
+            print(f'Making right environment gave {info} as exit code')
+        return result, info
 
-    def kernel(self, D=16, max_iter=100, tol=1e-12, verbosity=2, canon=True):
-        from numpy.random import rand
-
-        def newAlAr(Ac, c):
+    def set_uMPS(self, Ac, c, canon=True, tol=1e-14):
+        if canon:
+            uar = polar(Ac.reshape(self.M, -1), side='left')[0]
+            ucr = polar(c.reshape(self.M, self.M), side='left')[0]
+            self.Ar = ucr.conj().T @ uar
+            self.Al, self.c, info = self.canonicalize(self.Ar, c, tol)
+        else:
+            self.c = c
             uar = polar(Ac.reshape(self.M, -1), side='left')[0]
             ucr = polar(c.reshape(self.M, self.M), side='left')[0]
             ual = polar(Ac.reshape(-1, self.M), side='right')[0]
             ucl = polar(c.reshape(self.M, self.M), side='right')[0]
-            return ual @ ucl.conj().T, ucr.conj().T @ uar
+            self.Al, self.Ar = ual @ ucl.conj().T, ucr.conj().T @ uar
+            info = [0]
+        return info
+
+    def kernel(self, D=16, max_iter=100, tol=1e-12, verbosity=2, canon=True):
+        def print_info(i, vumps, ctol, w1, w2, canon_info):
+            print(
+                f'it: {i},\t'
+                f'E: {vumps.energy:.16g},\t'
+                f'Error: {vumps.error:.3g},\t'
+                f'tol: {ctol:.3g},\t'
+                f'HAc: {w1:.6g},\t'
+                f'Hc: {w2:.6g},\t'
+                f'c_its: {canon_info}'
+            )
 
         self.M = D
-        # Random initial guess
-        if canon:
-            self.Ar = polar(rand(self.M, self.p * self.M), side='left')[0]
-            c = None
-        else:
-            Ac = rand(self.M, self.p * self.M)
-            Ac /= norm(Ac)
-            _, self.c = polar(Ac, side='left')
-            self.Al, self.Ar = newAlAr(Ac, self.c)
-
-        ctol, err = 1e-3, 1e-3
+        # Random initial Ac and c guess
+        Ac = rand(self.M, self.p, self.M)
+        c = rand(self.M, self.M)
+        Ac, c = Ac / norm(Ac), c / norm(c)
+        ctol, self.error = 1e-3, 0
+        canon_info = self.set_uMPS(Ac, c, canon, tol=ctol)
+        self.Hl, _ = self.MakeHl(tol=ctol)
+        self.Hr, _ = self.MakeHr(tol=ctol)
 
         for i in range(max_iter):
-            if canon:
-                self.Al, self.c, canon_info = \
-                    self.canonicalize(self.Ar, c_in=c, tol=ctol)
-            else:
-                canon_info = [0]
-
-            self.Hl, Hl_info = self.MakeHl(tol=ctol)
-            self.Hr, Hr_info = self.MakeHr(tol=ctol)
-
-            if Hl_info != 0:
-                print(f'Making of left environ gave {Hl_info} as exit code')
-            if Hr_info != 0:
-                print(f'Making of right environ gave {Hr_info} as exit code')
-
-            ctol = max(min(1e-3, 1e-3 * err), 1e-15)
-            ctol = 1e-14
+            ctol = max(min(1e-3, 1e-4 * self.error), 1e-15)
 
             HAc = LinearOperator(
                 (self.M * self.M * self.p,) * 2,
@@ -649,39 +650,19 @@ class VUMPS:
             )
 
             # Solve the two eigenvalues problem for Ac and c
-            w1, v1 = eigsh(HAc, v0=self.Ac.ravel(), k=1, which='SA', tol=ctol)
-            w2, v2 = eigsh(Hc, v0=self.c.ravel(), k=1, which='SA', tol=ctol)
+            w1, v1 = eigsh(HAc, v0=self.Ac.ravel(), k=1, which='SA')
+            w2, v2 = eigsh(Hc, v0=self.c.ravel(), k=1, which='SA')
 
-            if canon:
-                uar, _ = polar(v1[:, 0].reshape(self.M, -1), side='left')
-                ucr, _ = polar(v2[:, 0].reshape(self.M, self.M), side='left')
-                self.Ar = ucr.conj().T @ uar
-            else:
-                self.c = v2[:, 0]
-                self.Al, self.Ar = newAlAr(v1[:, 0], self.c)
-            err = self.err
+            canon_info = self.set_uMPS(v1[:, 0], v2[:, 0], canon, tol=ctol)
+            self.Hl, _ = self.MakeHl(tol=ctol)
+            self.Hr, _ = self.MakeHr(tol=ctol)
+            self.energy, self.error = self.current_energy_and_error()
 
             if verbosity >= 2:
-                print(
-                    f'it: {i},\t'
-                    f'E: {self.energy:.16g},\t'
-                    f'Error: {err:.3g},\t'
-                    f'tol: {ctol:.3g},\t'
-                    f'HAc: {w1[0]:.6g},\t'
-                    f'Hc: {w2[0]:.6g},\t'
-                    f'c_its: {canon_info[0]}'
-                )
+                print_info(i, self, ctol, w1[0], w2[0], canon_info[0])
 
         if verbosity >= 1:
-            print(
-                f'it: {i},\t'
-                f'E: {self.energy:.16g},\t'
-                f'Error: {err:.3g}\t'
-                f'tol: {ctol:.3g},\t'
-                f'HAc: {w1[0]:.6g},\t'
-                f'Hc: {w2[0]:.6g},\t'
-                f'c_its: {canon_info[0]}'
-            )
+            print_info(i, self, ctol, w1[0], w2[0], canon_info[0])
 
 
 if __name__ == '__main__':
