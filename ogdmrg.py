@@ -1,5 +1,4 @@
 import numpy as np
-from numpy import complex128
 from numpy.random import rand
 from numpy.linalg import norm
 from scipy.linalg import polar
@@ -372,10 +371,14 @@ class OGDMRG:
 
 class VUMPS:
     """
+    For doing VUMPS.
+
+    VUMPS can use both real and complex tensors.
+
     Attributes:
         NN_interaction: The Nearest neighbour interaction for the hamiltonian
     """
-    def __init__(self, NN_interaction=None):
+    def __init__(self, NN_interaction=None, pure_real=False):
         """Initializes the VUMPS object.
 
         Args:
@@ -392,6 +395,7 @@ class VUMPS:
             self.NN_interaction = HeisenbergInteraction()
         else:
             self.NN_interaction = NN_interaction
+        self._dtype = np.float64 if pure_real else np.complex128
 
     @property
     def p(self):
@@ -446,6 +450,14 @@ class VUMPS:
         return self._Ac.reshape(self.M, self.p, self.M)
 
     def current_energy_and_error(self):
+        """Calculates the energy and estimated error of the current uMPS
+
+        The energy is calculated as the expectation value of Hc for c.
+
+        The error is calculated as ||HAc @ Ac - 2 * Hc @ c||_frobenius,
+        which should be zero in the fixed point (i.e. when Ac, Al, Ar and c are
+        consistent with each other and Ac and c are eigenstates of HAc and Hc).
+        """
         HAcAc = self.HAc(self.Ac)
         Hcc = self.Hc(self.c)
         E = np.dot(self.c.ravel().conj(), Hcc.ravel()).real
@@ -467,7 +479,7 @@ class VUMPS:
         """
         # Initial guess for c
         c = rand(self.M, self.M) if c_in is None else c_in
-        c = c / norm(c)
+        c = c.reshape(self.M, self.M) / norm(c)
 
         iterations = 0
         diff = None
@@ -490,7 +502,7 @@ class VUMPS:
                 LO = LinearOperator(
                     (c.size,) * 2,
                     matvec=AlAr,
-                    dtype=complex128
+                    dtype=self._dtype
                 )
 
                 print('norm:', np.dot(c.ravel().conj(), AlAr(c).ravel()),
@@ -573,7 +585,7 @@ class VUMPS:
 
         LO = LinearOperator((self.M * self.M,) * 2,
                             matvec=Transfer,
-                            dtype=complex128
+                            dtype=self._dtype
                             )
 
         r, info = bicgstab(LO, (h - P_NullSpace(h)).ravel(), tol=tol)
@@ -627,26 +639,33 @@ class VUMPS:
 
         self.M = D
         # Random initial Ac and c guess
-        Ac = rand(self.M, self.p, self.M)
-        c = rand(self.M, self.M)
+        if False and self._dtype == np.complex128:
+            Ac = rand(self.M, self.p, self.M) + \
+                rand(self.M, self.p, self.M) * 1j
+            c = rand(self.M, self.M) + rand(self.M, self.M) * 1j
+        else:
+            Ac = rand(self.M, self.p, self.M)
+            c = rand(self.M, self.M)
         Ac, c = Ac / norm(Ac), c / norm(c)
-        ctol, self.error = 1e-3, 0
+
+        ctol, self.error = 1e-3, 1
         canon_info = self.set_uMPS(Ac, c, canon, tol=ctol)
         self.Hl, _ = self.MakeHl(tol=ctol)
         self.Hr, _ = self.MakeHr(tol=ctol)
 
         for i in range(max_iter):
             ctol = max(min(1e-3, 1e-4 * self.error), 1e-15)
+            ctol = 1e-12
 
             HAc = LinearOperator(
                 (self.M * self.M * self.p,) * 2,
                 matvec=lambda x: self.HAc(x),
-                dtype=complex128
+                dtype=self._dtype
             )
             Hc = LinearOperator(
                 (self.M * self.M,) * 2,
                 matvec=lambda x: self.Hc(x),
-                dtype=complex128
+                dtype=self._dtype
             )
 
             # Solve the two eigenvalues problem for Ac and c
