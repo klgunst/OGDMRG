@@ -607,7 +607,7 @@ class VUMPS:
         self.NN_interaction = self.NN_interaction.conj().transpose()
         if info != 0:
             print(f'Making right environment gave {info} as exit code')
-        return result, info
+        return result.conj(), info
 
     def set_uMPS(self, Ac, c, canon=True, tol=1e-14):
         if canon:
@@ -639,7 +639,7 @@ class VUMPS:
 
         self.M = D
         # Random initial Ac and c guess
-        if False and self._dtype == np.complex128:
+        if self._dtype == np.complex128:
             Ac = rand(self.M, self.p, self.M) + \
                 rand(self.M, self.p, self.M) * 1j
             c = rand(self.M, self.M) + rand(self.M, self.M) * 1j
@@ -692,9 +692,10 @@ if __name__ == '__main__':
         D = [16]
 
     ogdmrg = OGDMRG(NN_interaction=IsingInteraction())
-    vumps = VUMPS(NN_interaction=four_site(HeisenbergInteraction()))
-    # vumps = VUMPS(NN_interaction=IsingInteraction())
+    vumps = VUMPS(NN_interaction=four_site(HeisenbergInteraction()),
+                  pure_real=False)
+    # vumps = VUMPS(NN_interaction=IsingInteraction(J=4), pure_real=False)
     for d in D:
-        vumps.kernel(D=d, max_iter=100, canon=False)
+        vumps.kernel(D=d, max_iter=100, canon=True)
         exit(0)
         ogdmrg.kernel(D=d, max_iter=1000, sites=2, tol=None)
