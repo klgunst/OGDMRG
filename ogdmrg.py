@@ -1,5 +1,8 @@
 import numpy as np
 from numpy import complex128
+from numpy.linalg import norm
+from scipy.linalg import polar
+from scipy.sparse.linalg import eigs, bicgstab, eigsh, LinearOperator
 
 
 def four_site(NN):
@@ -146,7 +149,7 @@ class OGDMRG:
         A2 = self._A_deque[-1].reshape(-1, self._A_deque[-1].shape[-1])
         XX = np.diag(self._s_deque[0]) @ A1.T @ A2 @ np.diag(self._s_deque[-1])
         s_diag = np.diag(self._s_deque[0] * self._s_deque[-1])
-        return np.linalg.norm(XX - s_diag)
+        return norm(XX - s_diag)
 
     @property
     def B(self):
@@ -325,7 +328,6 @@ class OGDMRG:
                        1: Print results for the optimization.
                        2: Print intermediate result at every even chain length.
         """
-        from scipy.sparse.linalg import eigsh, LinearOperator
         if sites % 2 != 0:
             raise ValueError('Number of sites needs to be even')
 
@@ -451,7 +453,7 @@ class VUMPS:
         HAcAc = self.HAc(self.Ac)
         Hcc = self.Hc(self.c)
         AlHcc = (self.Al.reshape(-1, self.M) @ Hcc.reshape(self.M, -1)).ravel()
-        return np.linalg.norm(HAcAc - 2 * AlHcc) / (2 * abs(self.energy))
+        return norm(HAcAc - 2 * AlHcc) / (2 * abs(self.energy))
 
     def H_2site(self, AA):
         """Executes the nearest neighbour interaction on a two-site tensor
@@ -466,9 +468,6 @@ class VUMPS:
 
         Solve Al @ c = c @ Ar subsequent QR decomposition
         """
-        from numpy.linalg import norm
-        from scipy.linalg import polar
-        from scipy.sparse.linalg import eigs, LinearOperator
         from numpy.random import rand
 
         # Initial guess for c
@@ -510,7 +509,7 @@ class VUMPS:
 
                 Alc = (Al.reshape(-1, self.M) @ c).ravel()
                 diff = norm(cAr.ravel() - Alc)
-                print(w[0], np.abs(1 - w[0]), diff, np.linalg.norm(c - co))
+                print(w[0], np.abs(1 - w[0]), diff, norm(c - co))
 
         # renormalize c to be sure
         return Al, c / norm(c), (iterations, diff)
@@ -554,8 +553,6 @@ class VUMPS:
         return result
 
     def MakeHeff(self, A, c, tol=1e-14):
-        from scipy.sparse.linalg import LinearOperator, bicgstab
-
         def P_NullSpace(x):
             """Projecting x on the nullspace of 1 - T
             """
@@ -599,20 +596,35 @@ class VUMPS:
         self.NN_interaction = self.NN_interaction.conj().transpose()
         return res[0], res[1]
 
-    def kernel(self, D=16, max_iter=100, tol=1e-12, verbosity=2):
-        from scipy.sparse.linalg import eigsh, LinearOperator
-        from scipy.linalg import polar
+    def kernel(self, D=16, max_iter=100, tol=1e-12, verbosity=2, canon=True):
         from numpy.random import rand
+
+        def newAlAr(Ac, c):
+            uar = polar(Ac.reshape(self.M, -1), side='left')[0]
+            ucr = polar(c.reshape(self.M, self.M), side='left')[0]
+            ual = polar(Ac.reshape(-1, self.M), side='right')[0]
+            ucl = polar(c.reshape(self.M, self.M), side='right')[0]
+            return ual @ ucl.conj().T, ucr.conj().T @ uar
 
         self.M = D
         # Random initial guess
-        self.Ar = polar(rand(self.M, self.p * self.M), side='left')[0]
-        c = None
+        if canon:
+            self.Ar = polar(rand(self.M, self.p * self.M), side='left')[0]
+            c = None
+        else:
+            Ac = rand(self.M, self.p * self.M)
+            Ac /= norm(Ac)
+            _, self.c = polar(Ac, side='left')
+            self.Al, self.Ar = newAlAr(Ac, self.c)
+
         ctol, err = 1e-3, 1e-3
 
         for i in range(max_iter):
-            self.Al, self.c, canon_info = \
-                self.canonicalize(self.Ar, c_in=c, tol=ctol)
+            if canon:
+                self.Al, self.c, canon_info = \
+                    self.canonicalize(self.Ar, c_in=c, tol=ctol)
+            else:
+                canon_info = [0]
 
             self.Hl, Hl_info = self.MakeHl(tol=ctol)
             self.Hr, Hr_info = self.MakeHr(tol=ctol)
@@ -622,7 +634,7 @@ class VUMPS:
             if Hr_info != 0:
                 print(f'Making of right environ gave {Hr_info} as exit code')
 
-            ctol = max(min(1e-8, 1e-3 * err), 1e-14)
+            ctol = max(min(1e-3, 1e-3 * err), 1e-15)
             ctol = 1e-14
 
             HAc = LinearOperator(
@@ -637,12 +649,16 @@ class VUMPS:
             )
 
             # Solve the two eigenvalues problem for Ac and c
-            w1, v1 = eigsh(HAc, v0=self.Ac.ravel(), k=1, which='SA')
-            w2, v2 = eigsh(Hc, v0=self.c.ravel(), k=1, which='SA')
+            w1, v1 = eigsh(HAc, v0=self.Ac.ravel(), k=1, which='SA', tol=ctol)
+            w2, v2 = eigsh(Hc, v0=self.c.ravel(), k=1, which='SA', tol=ctol)
 
-            uar, _ = polar(v1[:, 0].reshape(self.M, -1), side='left')
-            ucr, _ = polar(v2[:, 0].reshape(self.M, self.M), side='left')
-            self.Ar = ucr.conj().T @ uar
+            if canon:
+                uar, _ = polar(v1[:, 0].reshape(self.M, -1), side='left')
+                ucr, _ = polar(v2[:, 0].reshape(self.M, self.M), side='left')
+                self.Ar = ucr.conj().T @ uar
+            else:
+                self.c = v2[:, 0]
+                self.Al, self.Ar = newAlAr(v1[:, 0], self.c)
             err = self.err
 
             if verbosity >= 2:
@@ -676,10 +692,9 @@ if __name__ == '__main__':
         D = [16]
 
     ogdmrg = OGDMRG(NN_interaction=IsingInteraction())
-    vumps = VUMPS(NN_interaction=four_site(IsingInteraction(J=3.8)))
     vumps = VUMPS(NN_interaction=four_site(HeisenbergInteraction()))
-    vumps = VUMPS(NN_interaction=IsingInteraction())
+    # vumps = VUMPS(NN_interaction=IsingInteraction())
     for d in D:
-        vumps.kernel(D=d, max_iter=100)
+        vumps.kernel(D=d, max_iter=100, canon=False)
         exit(0)
         ogdmrg.kernel(D=d, max_iter=1000, sites=2, tol=None)
