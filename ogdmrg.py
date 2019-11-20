@@ -213,7 +213,7 @@ class OGDMRG:
             result += np.einsum('xyij,lijr->lxyr', self.NN_interaction, x)
         return result.ravel()
 
-    def renormalize_basis(self, A2, D, tol=1e-10):
+    def renormalize_basis(self, A2, D, tol=1e-16):
         """Renormalize the basis.
         """
         from numpy.linalg import svd, qr
@@ -396,6 +396,97 @@ class VUMPS:
         assert len(self.NN_interaction.shape) == 4
         return self.NN_interaction.shape[0]
 
+    @property
+    def Ar(self):
+        """Right canonical tensor.
+
+        Ar, Al and c are made properties to be sure they always have the
+        expected shape.
+        """
+        return self._Ar.reshape(self.M, self.p, self.M)
+
+    @Ar.setter
+    def Ar(self, Ar):
+        self._Ar = Ar
+        self._Ac = None
+
+    @property
+    def Al(self):
+        """Left canonical tensor.
+        """
+        return self._Al.reshape(self.M, self.p, self.M)
+
+    @Al.setter
+    def Al(self, Al):
+        self._Al = Al
+        self._Ac = None
+
+    @property
+    def c(self):
+        """Central tensor.
+        """
+        try:
+            return self._c.reshape(self.M, self.M)
+        except AttributeError:
+            return None
+
+    @c.setter
+    def c(self, c):
+        self._c = c
+        self._Ac = None
+
+    @property
+    def Ac(self):
+        if self._Ac is None:
+            self._Ac = self.c @ self.Ar.reshape(self.M, -1)
+        return self._Ac.reshape(self.M, self.p, self.M)
+
+    @property
+    def energy(self):
+        return np.dot(self.c.ravel(), self.Hc(self.c))
+
+    @property
+    def err(self):
+        HAcAc = self.HAc(self.Ac.ravel())
+        Hcc = self.Hc(self.c.ravel())
+        AlHcc = (self.Al.reshape(-1, self.M) @ Hcc.reshape(self.M, -1)).ravel()
+        return np.linalg.norm(HAcAc - 2 * AlHcc) / abs(self.energy)
+
+    def H_2site(self, AA):
+        """Executes the nearest neighbour interaction on a two-site tensor
+        """
+        return np.einsum('lijr,xyij->lxyr',
+                         AA.reshape(self.M, self.p, self.p, self.M),
+                         self.NN_interaction
+                         )
+
+    def canonicalize(self, Ar, c_in=None, tol=1e-14):
+        """Ar given, what is Al and c?
+
+        Solve Al @ c = c @ Ar subsequent QR decomposition
+        """
+        from numpy.linalg import norm
+        from scipy.linalg import polar
+        from numpy.random import rand
+
+        # Initial guess for c
+        c = rand(self.M, self.M) if c_in is None else c_in
+        c = c / norm(c)
+
+        iterations = 0
+        diff = None
+        while diff is None or diff > tol:
+            iterations += 1
+            cAr = c @ Ar.reshape(self.M, -1)
+            Al, c = polar(cAr.reshape(self.M * self.p, -1))
+
+            cAr = (c @ Ar.reshape(self.M, -1)).ravel()
+            Alc = (Al.reshape(-1, self.M) @ c).ravel()
+            diff = norm(cAr - Alc)
+
+        # renormalize c to be sure
+        return Al, c / norm(c), (iterations, diff)
+
     def HAc(self, x):
         # left Heff
         result = (self.Hl @ x.reshape(self.M, -1)).ravel()
@@ -404,19 +495,15 @@ class VUMPS:
 
         # first onsite
         LL = self.Al.reshape(-1, self.M) @ x.reshape(self.M, -1)
-        LL = np.einsum('lijr,xyij->lxyr',
-                       LL.reshape(self.M, self.p, self.p, self.M),
-                       self.NN_interaction
-                       )
+        LL = self.H_2site(LL)
+
         result += (self.Al.reshape(self.M * self.p, -1).T @
                    LL.reshape(self.M * self.p, -1)).ravel()
 
         # second onsite
         RR = x.reshape(-1, self.M) @ self.Ar.reshape(self.M, -1)
-        RR = np.einsum('lijr,xyij->lxyr',
-                       RR.reshape(self.M, self.p, self.p, self.M),
-                       self.NN_interaction
-                       )
+        RR = self.H_2site(RR)
+
         result += (RR.reshape(-1, self.M * self.p) @
                    self.Ar.reshape(-1, self.M * self.p).T).ravel()
         return result
@@ -430,104 +517,109 @@ class VUMPS:
 
         # On site
         C1 = self.Al.reshape(-1, self.M) @ x @ self.Ar.reshape(self.M, -1)
-        C2 = np.einsum('lijr,xyij->lxyr',
-                       C1.reshape(self.M, self.p, self.p, self.M),
-                       self.NN_interaction
-                       )
-        C3 = C2.reshape(-1, self.p * self.M) @ \
+        C1 = self.H_2site(C1)
+
+        C3 = C1.reshape(-1, self.p * self.M) @ \
             self.Ar.reshape(-1, self.p * self.M).T
         result += (self.Al.reshape(self.M * self.p, -1).T @
                    C3.reshape(self.p * self.M, -1)).ravel()
         return result
 
-    def MakeHeffLeft(self):
+    def MakeHeff(self, A, c, tol=1e-14):
         from scipy.sparse.linalg import bicgstab, LinearOperator
 
-        All = self.Al.reshape(-1, self.M) @ self.Al.reshape(self.M, -1)
-        Hall = np.einsum('lijr,xyij->lxyr',
-                         All.reshape(self.M, self.p, self.p, self.M),
-                         self.NN_interaction
-                         )
-        hl = All.reshape(-1, self.M).T @ Hall.reshape(-1, self.M)
-        e = np.trace(self.c.T @ hl @ self.c) * np.eye(self.M)
-
-        def Afunc(x):
+        def P_NullSpace(x):
+            """Projecting x on the nullspace of 1 - T
+            """
             x = x.reshape(self.M, self.M)
-            res = (np.trace(self.c.T @ x @ self.c) * np.eye(self.M)).ravel()
-            res += x.ravel()
-            self.Al = self.Al.reshape(self.M, self.p, self.M)
-            res -= np.einsum('ij,jpa,ipb->ba', x, self.Al, self.Al).ravel()
+            return np.trace(c.T @ x @ c) * np.eye(self.M)
+
+        def Transfer(x):
+            """Executing (1 - (T - P)) @ x
+            """
+            x = x.reshape(self.M, self.M)
+            res = x.ravel().copy()
+            res += P_NullSpace(x).ravel()
+            res -= np.einsum('ij,jpa,ipb->ba', x, A, A).ravel()
             return res
 
-        A = LinearOperator((self.M * self.M,) * 2, matvec=Afunc)
-        r, info = bicgstab(A, (hl - e).ravel())
-        print(info)
-        return r.reshape(self.M, self.M)
+        AA = A.reshape(-1, self.M) @ A.reshape(self.M, -1)
+        HAA = self.H_2site(AA)
 
-    def MakeHeffRight(self):
-        from scipy.sparse.linalg import bicgstab, LinearOperator
+        h = AA.reshape(-1, self.M).T @ HAA.reshape(-1, self.M)
 
-        Arr = self.Ar.reshape(-1, self.M) @ self.Ar.reshape(self.M, -1)
-        Harr = np.einsum('lijr,xyij->lxyr',
-                         Arr.reshape(self.M, self.p, self.p, self.M),
-                         self.NN_interaction
-                         )
-        hr = Arr.reshape(self.M, -1) @ Harr.reshape(self.M, -1).T
-        e = np.trace(self.c @ hr @ self.c.T) * np.eye(self.M)
+        LO = LinearOperator((self.M * self.M,) * 2, matvec=Transfer)
+        r, info = bicgstab(LO, (h - P_NullSpace(h)).ravel(), tol=tol)
 
-        def Afunc(x):
-            x = x.reshape(self.M, self.M)
-            res = (np.trace(self.c @ x @ self.c.T) * np.eye(self.M)).ravel()
-            res += x.ravel()
-            self.Ar = self.Ar.reshape(self.M, self.p, self.M)
-            res -= np.einsum('ij,apj,bpi->ba', x, self.Ar, self.Ar).ravel()
-            return res
+        # return (1 - P) @ result
+        r = r.reshape(self.M, self.M)
+        return r - P_NullSpace(r), info
 
-        A = LinearOperator((self.M * self.M,) * 2, matvec=Afunc)
-        r, info = bicgstab(A, (hr - e).ravel())
-        print(info)
-        return r.reshape(self.M, self.M)
+    def MakeHl(self, tol):
+        return self.MakeHeff(self.Al, self.c, tol)
 
-    def kernel(self, D=16, max_iter=100, tol=1e-6, verbosity=2):
+    def MakeHr(self, tol):
+        return self.MakeHeff(self.Ar.transpose(), self.c.T, tol)
+
+    def kernel(self, D=16, max_iter=100, tol=1e-12, verbosity=2):
         from scipy.sparse.linalg import eigsh, LinearOperator
         from scipy.linalg import polar
         from numpy.random import rand
+        from numpy.linalg import qr
+
         self.M = D
-
-        Ac = rand(self.M, self.p, self.M)
-
-        ual, pal = polar(Ac.reshape(-1, self.M), side='right')
-        self.c = pal
-
-        uar, par = polar(Ac.reshape(self.M, -1), side='left')
-        ucl, pcl = polar(self.c, side='right')
-        ucr, pcr = polar(self.c, side='left')
-        self.Al, self.Ar = ual @ ucl.T, ucr.T @ uar
+        self.Ar = qr(rand(self.M, self.p * self.M).T)[0].T
+        c = None
+        ctol = 1e-3
 
         for i in range(max_iter):
-            self.Hl = self.MakeHeffLeft()
-            self.Hr = self.MakeHeffRight()
+            self.Al, self.c, canon_info = \
+                self.canonicalize(self.Ar, c_in=c, tol=ctol)
+
+            self.Hl, Hl_info = self.MakeHl(tol=ctol)
+            self.Hr, Hr_info = self.MakeHr(tol=ctol)
+            ctol = min(1e-12, 1e-3 * self.err)
 
             HAc = LinearOperator(
                 (self.M * self.M * self.p,) * 2,
                 matvec=lambda x: self.HAc(x)
             )
             Hc = LinearOperator(
-                (self.M * self.M,) * 2, matvec=lambda x: self.Hc(x)
+                (self.M * self.M,) * 2,
+                matvec=lambda x: self.Hc(x)
             )
+
             # Solve the two eigenvalues problem for Ac and c
-            w1, v1 = eigsh(HAc, k=1, which='SA')
-            w2, v2 = eigsh(Hc, k=1, which='SA')
-            print(f'HAc: {w1[0] / 2}, Hc: {w2[0]}')
+            w1, v1 = eigsh(HAc, v0=self.Ac.ravel(), k=1, which='SA')
+            w2, v2 = eigsh(Hc, v0=self.c.ravel(), k=1, which='SA')
 
-            Ac = v1[:, 0].reshape(self.M, self.p, self.M)
-            self.c = v2[:, 0].reshape(self.M, self.M)
+            uar, _ = polar(v1[:, 0].reshape(self.M, -1), side='left')
+            ucr, _ = polar(v2[:, 0].reshape(self.M, self.M), side='left')
+            self.Ar = ucr.T @ uar
 
-            ual, pal = polar(Ac.reshape(-1, self.M), side='right')
-            uar, par = polar(Ac.reshape(self.M, -1), side='left')
-            ucl, pcl = polar(self.c, side='right')
-            ucr, pcr = polar(self.c, side='left')
-            self.Al, self.Ar = ual @ ucl.T, ucr.T @ uar
+            if self.err < tol:
+                break
+            if verbosity >= 2:
+                print(
+                    f'it: {i},\t'
+                    f'E: {self.energy},\t'
+                    f'Error: {self.err:.3g},\t'
+                    f'tol: {ctol:.3g},\t'
+                    f'HAc: {w1[0]:.6g},\t'
+                    f'Hc: {w2[0]:.6g},\t'
+                    f'c_its: {canon_info[0]}'
+                )
+
+        if verbosity >= 1:
+            print(
+                f'it: {i},\t'
+                f'E: {self.energy},\t'
+                f'Error: {self.err:.3g}\t'
+                f'tol: {ctol:.3g},\t'
+                f'HAc: {w1[0]:.6g},\t'
+                f'Hc: {w2[0]:.6g},\t'
+                f'c_its: {canon_info[0]}'
+            )
 
 
 if __name__ == '__main__':
@@ -538,7 +630,7 @@ if __name__ == '__main__':
         D = [16]
 
     ogdmrg = OGDMRG(NN_interaction=IsingInteraction())
-    vumps = VUMPS(NN_interaction=IsingInteraction())
+    vumps = VUMPS(NN_interaction=IsingInteraction(J=3.8))
     vumps = VUMPS(NN_interaction=four_site(HeisenbergInteraction()))
     for d in D:
         vumps.kernel(D=d, max_iter=1000)
