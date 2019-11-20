@@ -447,8 +447,8 @@ class VUMPS:
 
     @property
     def err(self):
-        HAcAc = self.HAc(self.Ac.ravel())
-        Hcc = self.Hc(self.c.ravel())
+        HAcAc = self.HAc(self.Ac)
+        Hcc = self.Hc(self.c)
         AlHcc = (self.Al.reshape(-1, self.M) @ Hcc.reshape(self.M, -1)).ravel()
         return np.linalg.norm(HAcAc - 2 * AlHcc) / abs(self.energy)
 
@@ -559,7 +559,10 @@ class VUMPS:
         return self.MakeHeff(self.Al, self.c, tol)
 
     def MakeHr(self, tol):
-        return self.MakeHeff(self.Ar.transpose(), self.c.T, tol)
+        self.NN_interaction = self.NN_interaction.transpose()
+        res = self.MakeHeff(self.Ar.transpose(), self.c.T, tol)
+        self.NN_interaction = self.NN_interaction.transpose()
+        return res
 
     def kernel(self, D=16, max_iter=100, tol=1e-12, verbosity=2):
         from scipy.sparse.linalg import eigsh, LinearOperator
@@ -568,6 +571,8 @@ class VUMPS:
         from numpy.linalg import qr
 
         self.M = D
+
+        # Random initial guess
         self.Ar = qr(rand(self.M, self.p * self.M).T)[0].T
         c = None
         ctol = 1e-3
@@ -578,7 +583,13 @@ class VUMPS:
 
             self.Hl, Hl_info = self.MakeHl(tol=ctol)
             self.Hr, Hr_info = self.MakeHr(tol=ctol)
-            ctol = min(1e-12, 1e-3 * self.err)
+
+            if Hl_info != 0:
+                print(f'Making of left environ gave {Hl_info} as exit code')
+            if Hr_info != 0:
+                print(f'Making of right environ gave {Hr_info} as exit code')
+
+            ctol = max(min(1e-14, 1e-3 * self.err), 1e-14)
 
             HAc = LinearOperator(
                 (self.M * self.M * self.p,) * 2,
@@ -602,7 +613,7 @@ class VUMPS:
             if verbosity >= 2:
                 print(
                     f'it: {i},\t'
-                    f'E: {self.energy},\t'
+                    f'E: {self.energy:.16g},\t'
                     f'Error: {self.err:.3g},\t'
                     f'tol: {ctol:.3g},\t'
                     f'HAc: {w1[0]:.6g},\t'
@@ -613,7 +624,7 @@ class VUMPS:
         if verbosity >= 1:
             print(
                 f'it: {i},\t'
-                f'E: {self.energy},\t'
+                f'E: {self.energy:.16g},\t'
                 f'Error: {self.err:.3g}\t'
                 f'tol: {ctol:.3g},\t'
                 f'HAc: {w1[0]:.6g},\t'
@@ -633,6 +644,6 @@ if __name__ == '__main__':
     vumps = VUMPS(NN_interaction=IsingInteraction(J=3.8))
     vumps = VUMPS(NN_interaction=four_site(HeisenbergInteraction()))
     for d in D:
-        vumps.kernel(D=d, max_iter=1000)
+        vumps.kernel(D=d, max_iter=50)
         exit(0)
         ogdmrg.kernel(D=d, max_iter=1000, sites=2, tol=None)
