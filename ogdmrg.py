@@ -467,10 +467,12 @@ class VUMPS:
     def H_2site(self, AA):
         """Executes the nearest neighbour interaction on a two-site tensor
         """
-        return np.einsum('lijr,xyij->lxyr',
-                         AA.reshape(self.M, self.p, self.p, self.M),
-                         self.NN_interaction
-                         )
+        result = np.zeros((self.M, self.p * self.p, self.M), dtype=self._dtype)
+        AA = AA.reshape(self.M, self.p * self.p, self.M)
+        NN = self.NN_interaction.reshape(self.p * self.p, -1)
+        for i in range(self.M):
+            result[i] = NN @ AA[i]
+        return result
 
     def canonicalize(self, Ar, c_in=None, tol=1e-14):
         """Ar given, what is Al and c?
@@ -696,6 +698,6 @@ if __name__ == '__main__':
                   pure_real=False)
     # vumps = VUMPS(NN_interaction=IsingInteraction(J=4), pure_real=False)
     for d in D:
-        vumps.kernel(D=d, max_iter=100, canon=True)
+        vumps.kernel(D=d, max_iter=100, canon=False)
         exit(0)
         ogdmrg.kernel(D=d, max_iter=1000, sites=2, tol=None)
