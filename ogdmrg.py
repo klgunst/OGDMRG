@@ -1,8 +1,48 @@
 import numpy as np
 from numpy.random import rand
 from numpy.linalg import norm
-from scipy.linalg import polar
-from scipy.sparse.linalg import eigs, bicgstab, eigsh, LinearOperator
+from scipy.linalg import polar, svd
+from scipy.sparse.linalg import bicgstab, eigs, eigsh, LinearOperator
+
+
+def canonicalize(Ar, c_in=None, tol=1e-14, dtype=np.float64):
+    assert len(Ar.shape) == 3
+    M = Ar.shape[-1]
+    A = Ar.copy()
+    c = np.eye(M)
+
+    diff = 1
+    iterations = 1
+    while diff > tol:
+        def Transfer(x, A):
+            xA = x.reshape(M, M) @ A.reshape(M, -1)
+            return (A.reshape(-1, M).conj().T @ xA.reshape(-1, M)).ravel()
+
+        iterations += 1
+        LO = LinearOperator(
+            (M ** 2,) * 2,
+            matvec=lambda x: Transfer(x, A),
+            dtype=dtype
+        )
+        w, v = eigs(LO, k=1, which='LM')
+
+        U, s, Vh = svd(v[:, 0].reshape(M, M))
+        sqrt_eps = np.sqrt(np.finfo(dtype).eps)
+        s = np.array([max(np.sqrt(st), sqrt_eps) for st in s])
+        s = s / norm(s)
+        c1 = np.diag(s) @ Vh
+        c1_inv = Vh.conj().T @ np.diag(1 / s)
+        A = c1 @ A.reshape(M, -1)
+        A = A.reshape(-1, M) @ c1_inv
+        A = A / norm(A) * np.sqrt(M)
+
+        c = c1 @ c
+        c = c / norm(c)
+        diff = norm(v[:, 0].reshape(M, M) - np.eye(M) * v.flatten()[0])
+    assert np.isclose(
+        norm(A.reshape(-1, M).conj().T @ A.reshape(-1, M) - np.eye(M)), 0
+    )
+    return A, c / norm(c), (iterations, diff)
 
 
 def four_site(NN):
@@ -138,7 +178,7 @@ class OGDMRG:
             self._A_deque.appendleft(A)
         except AttributeError:
             # The deque is not initialized yet
-            self._A_deque = deque(maxlen=3)
+            self._A_deque = deque(maxlen=2)
             self._A_deque.appendleft(A)
 
     @property
@@ -147,8 +187,10 @@ class OGDMRG:
         """
         A1 = self._A_deque[0].reshape(-1, self._A_deque[0].shape[-1])
         A2 = self._A_deque[-1].reshape(-1, self._A_deque[-1].shape[-1])
-        XX = np.diag(self._s_deque[0]) @ A1.T @ A2 @ np.diag(self._s_deque[-1])
-        s_diag = np.diag(self._s_deque[0] * self._s_deque[-1])
+        s1 = self._s_deque[0][:A1.shape[-1]]
+        s2 = self._s_deque[-1][:A2.shape[-1]]
+        XX = np.diag(s1) @ A1.T @ A2 @ np.diag(s2)
+        s_diag = np.diag(s1 * s2)
         return norm(XX - s_diag)
 
     @property
@@ -169,7 +211,7 @@ class OGDMRG:
             self._B_deque.appendleft(B)
         except AttributeError:
             # The deque is not initialized yet
-            self._B_deque = deque(maxlen=3)
+            self._B_deque = deque(maxlen=2)
             self._B_deque.appendleft(B)
 
     @property
@@ -184,7 +226,7 @@ class OGDMRG:
             self._s_deque.appendleft(s)
         except AttributeError:
             # The deque is not initialized yet
-            self._s_deque = deque(maxlen=3)
+            self._s_deque = deque(maxlen=2)
             self._s_deque.appendleft(s)
 
     def Heff(self, x):
@@ -217,13 +259,12 @@ class OGDMRG:
             result += np.einsum('xyij,lijr->lxyr', self.NN_interaction, x)
         return result.ravel()
 
-    def renormalize_basis(self, A2, D, tol=1e-16):
+    def renormalize_basis(self, A2, D, tol=1e-13):
         """Renormalize the basis.
         """
-        from numpy.linalg import svd, qr
         hsites = self.nrsites // 2
         u, s, v = svd(A2.reshape((self.M * self.p ** hsites,) * 2))
-        svd_diff = (s[:-1] - s[1:]) / s[:-1]
+        svd_diff = (s[:-1] - s[1:])
 
         # Array with Trues every time this singular value is different than the
         # previous one (up to a tolerance)
@@ -240,26 +281,29 @@ class OGDMRG:
         # discard the last multiplet
         if new_sval[lastmultiplet] > 1.2 * D:
             lastmultiplet -= 1
-        D = new_sval[lastmultiplet]
+        if not (D < len(s) and s[D] < tol):
+            D = new_sval[lastmultiplet]
+
+        # fixing the guage
         u = u[:, :D]
         v = v[:D, :]
+        if D == self.M and D == self.A.shape[0]:
+            totD = len(s)
+            totD = D
+            AAx = u.conj().reshape(-1, totD).T @ self.A.reshape(-1, self.M)
+            u2, s2, v2 = svd(AAx, full_matrices=False)
+            # print("unitary dist", np.max(abs(s2 - 1)))
+            Q = u2 @ v2
+            u = u @ Q
 
-        # Trying to fix the guage
-        for begin, end in zip(new_sval[:lastmultiplet], new_sval[1:]):
-            Q, U = qr(u[:, begin:end].T)
-            U = U.T
-
-            # First nonzero element in each column
-            fnz = U[np.argmin(np.isclose(U, 0), axis=0), range(U.shape[1])]
-            u[:, begin:end] = U * (1 - 2 * (fnz < 0))[None, :]
-            Q = Q * (1 - 2 * (fnz < 0))[None, :]
-
-            v[begin:end, :] = Q.T @ v[begin:end, :]
+            BBx = self.B.reshape(self.M, -1) @ v.reshape(totD, -1).conj().T
+            u2, s2, v2 = svd(BBx, full_matrices=False)
+            Q = u2 @ v2
+            v = Q @ v
 
         self.B = v.reshape(D, *(self.p,) * hsites, self.M)
         self.A = u.reshape(self.M, *(self.p,) * hsites, D)
-        self.s = s[:D]
-
+        self.s = s
         return s[D:] @ s[D:]
 
     def update_Heff(self):
@@ -341,14 +385,14 @@ class OGDMRG:
             # Diagonalize
             w, v = eigsh(H, k=1, which='SA')
             # Renormalize the basis
+            E = (w[0] - self.Etot) / self.nrsites
+            ΔE, self.E, self.Etot = self.E - E, E, w[0]
+
             trunc = self.renormalize_basis(v[:, 0], D)
             # Update the effective Hamiltonian
             self.update_Heff()
 
             # Energy difference between this and the previous even-length chain
-            E = (w[0] - self.Etot) / self.nrsites
-            ΔE, self.E, self.Etot = self.E - E, E, w[0]
-
             if verbosity >= 2:
                 try:
                     print(f"it {i}:\tM: {self.M},\tE: {self.E:.12f},\t"
@@ -474,55 +518,6 @@ class VUMPS:
             result[i] = NN @ AA[i]
         return result
 
-    def canonicalize(self, Ar, c_in=None, tol=1e-14):
-        """Ar given, what is Al and c?
-
-        Solve Al @ c = c @ Ar subsequent QR decomposition
-        """
-        # Initial guess for c
-        c = rand(self.M, self.M) if c_in is None else c_in
-        c = c.reshape(self.M, self.M) / norm(c)
-
-        iterations = 0
-        diff = None
-        cAr = c @ Ar.reshape(self.M, -1)
-        while diff is None or diff > tol:
-            iterations += 1
-            Al, c = polar(cAr.reshape(self.M * self.p, -1))
-            cAr = (c @ Ar.reshape(self.M, -1)).ravel()
-            Alc = (Al.reshape(-1, self.M) @ c).ravel()
-            diff = norm(cAr - Alc)
-
-            if False and iterations > 100 and iterations % 3 == 0:
-                # Does not work
-                def AlAr(x):
-                    Alx = Al.reshape(-1, self.M) @ x.reshape(self.M, self.M)
-                    return (Alx.reshape(self.M, -1) @
-                            Ar.reshape(self.M, -1).conj().T).ravel()
-
-                # every third iteration solve eigenvalue problem
-                LO = LinearOperator(
-                    (c.size,) * 2,
-                    matvec=AlAr,
-                    dtype=self._dtype
-                )
-
-                print('norm:', np.dot(c.ravel().conj(), AlAr(c).ravel()),
-                      np.abs(1 - np.dot(c.ravel().conj(), AlAr(c).ravel())))
-                w, v = eigs(LO, v0=c.ravel(), k=1, which='LR')
-                co = c
-                # c = polar(v[:, 0].reshape(self.M, self.M))[1]
-                c = v[:, 0].reshape(self.M, -1)
-                # c = (c + c.T) * (-1 if np.trace(c) < 0 else 1)
-                cAr = c @ Ar.reshape(self.M, -1)
-
-                Alc = (Al.reshape(-1, self.M) @ c).ravel()
-                diff = norm(cAr.ravel() - Alc)
-                print(w[0], np.abs(1 - w[0]), diff, norm(c - co))
-
-        # renormalize c to be sure
-        return Al, c / norm(c), (iterations, diff)
-
     def HAc(self, x):
         # left Heff
         result = (self.Hl @ x.reshape(self.M, -1)).ravel()
@@ -616,7 +611,7 @@ class VUMPS:
             uar = polar(Ac.reshape(self.M, -1), side='left')[0]
             ucr = polar(c.reshape(self.M, self.M), side='left')[0]
             self.Ar = ucr.conj().T @ uar
-            self.Al, self.c, info = self.canonicalize(self.Ar, c, tol)
+            self.Al, self.c, info = canonicalize(self.Ar, c, tol, self._dtype)
         else:
             self.c = c
             uar = polar(Ac.reshape(self.M, -1), side='left')[0]
@@ -627,7 +622,7 @@ class VUMPS:
             info = [0]
         return info
 
-    def kernel(self, D=16, max_iter=100, tol=1e-12, verbosity=2, canon=True):
+    def kernel(self, D=16, max_iter=1000, tol=1e-10, verbosity=2, canon=True):
         def print_info(i, vumps, ctol, w1, w2, canon_info):
             print(
                 f'it: {i},\t'
@@ -656,8 +651,8 @@ class VUMPS:
         self.Hr, _ = self.MakeHr(tol=ctol)
 
         for i in range(max_iter):
-            ctol = max(min(1e-3, 1e-4 * self.error), 1e-15)
-            ctol = 1e-12
+            ctol = max(min(1e-3, 1e-3 * self.error), 1e-15)
+            etol = ctol ** 2 if ctol ** 2 > 1e-16 else 0
 
             HAc = LinearOperator(
                 (self.M * self.M * self.p,) * 2,
@@ -671,13 +666,16 @@ class VUMPS:
             )
 
             # Solve the two eigenvalues problem for Ac and c
-            w1, v1 = eigsh(HAc, v0=self.Ac.ravel(), k=1, which='SA')
-            w2, v2 = eigsh(Hc, v0=self.c.ravel(), k=1, which='SA')
+            w1, v1 = eigsh(HAc, v0=self.Ac.ravel(), k=1, which='SA', tol=etol)
+            w2, v2 = eigsh(Hc, v0=self.c.ravel(), k=1, which='SA', tol=etol)
 
             canon_info = self.set_uMPS(v1[:, 0], v2[:, 0], canon, tol=ctol)
             self.Hl, _ = self.MakeHl(tol=ctol)
             self.Hr, _ = self.MakeHr(tol=ctol)
             self.energy, self.error = self.current_energy_and_error()
+
+            if self.error < tol:
+                break
 
             if verbosity >= 2:
                 print_info(i, self, ctol, w1[0], w2[0], canon_info[0])
@@ -694,10 +692,9 @@ if __name__ == '__main__':
         D = [16]
 
     ogdmrg = OGDMRG(NN_interaction=IsingInteraction())
-    vumps = VUMPS(NN_interaction=four_site(HeisenbergInteraction()),
-                  pure_real=False)
-    # vumps = VUMPS(NN_interaction=IsingInteraction(J=4), pure_real=False)
+    ogdmrg = OGDMRG(NN_interaction=HeisenbergInteraction())
+    vumps = VUMPS(NN_interaction=four_site(HeisenbergInteraction()))
+    # vumps = VUMPS(NN_interaction=IsingInteraction())
     for d in D:
-        vumps.kernel(D=d, max_iter=100, canon=False)
-        exit(0)
-        ogdmrg.kernel(D=d, max_iter=1000, sites=2, tol=None)
+        # vumps.kernel(D=d, max_iter=100, canon=True)
+        ogdmrg.kernel(D=d, max_iter=10000, sites=4, tol=None)
