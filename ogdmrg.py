@@ -302,31 +302,33 @@ class OGDMRG:
         # user, we just try not to cut up degenerate singular values.
         lastmultiplet = -1 if new_sval[-1] < D else np.argmax(new_sval >= D)
 
-        # If adding the full multiplet makes the bond dimension too large,
-        # discard the last multiplet
-        if new_sval[lastmultiplet] > 1.2 * D:
-            lastmultiplet -= 1
-        if not (D < len(s) and s[D] < tol):
-            D = new_sval[lastmultiplet]
+        # Dimension of full multiplet
+        Df = new_sval[lastmultiplet]
+        # Make sure bond dimension does not explode
+        # D = D if Df > 20 + D else Df
+        D = min(D, len(s))
 
         # fixing the guage
-        u = u[:, :D]
-        v = v[:D, :]
-        cid = self.compare_back - 1
-        flag = hasattr(self, '_A_deque') and \
-            len(self._A_deque) > cid
-        if flag and self.M == self._A_deque[cid].shape[0] \
-                and D == self._A_deque[cid].shape[-1]:
-            AAx = u.conj().reshape(-1, D).T @ \
-                self._A_deque[cid].reshape(-1, D)
+        try:
+            Acomp = self._A_deque[self.compare_back - 1]
+            Bcomp = self._B_deque[self.compare_back - 1]
+            # New bond dimension needed is same as the previous one
+            doGuagefix = D == Acomp.shape[-1] and self.M == Acomp.shape[0]
+        except (AttributeError, IndexError):
+            doGuagefix = False
+
+        if doGuagefix:
+            u = u[:, :Df]
+            v = v[:Df, :]
+            AAx = u.conj().reshape(-1, Df).T @ Acomp.reshape(-1, D)
             u2, s2, v2 = svd(AAx, full_matrices=False)
+
             Q = u2 @ v2
             u = u @ Q
-            c = Q.conj().T @ np.diag(s[:D] / norm(s[:D]))
+            c = Q.conj().T @ np.diag(s[:Df] / norm(s[:Df]))
             uni1 = np.max(abs(s2 - 1))
 
-            BBx = self._B_deque[cid].reshape(D, -1) @ \
-                v.reshape(D, -1).conj().T
+            BBx = Bcomp.reshape(D, -1) @ v.reshape(Df, -1).conj().T
             u2, s2, v2 = svd(BBx, full_matrices=False)
             Q = u2 @ v2
             v = Q @ v
@@ -344,6 +346,8 @@ class OGDMRG:
             }
             self.c = c
         else:
+            u = u[:, :D]
+            v = v[:D, :]
             self.c = np.diag(s[:D])
             info = None
 
@@ -726,7 +730,7 @@ if __name__ == '__main__':
     else:
         D = [16]
 
-    ogdmrg = OGDMRG(NN_interaction=IsingInteraction())
+    # ogdmrg = OGDMRG(NN_interaction=IsingInteraction(J=3.8))
     ogdmrg = OGDMRG(NN_interaction=HeisenbergInteraction(), compare_back=2)
     # vumps = VUMPS(NN_interaction=four_site(HeisenbergInteraction()))
     # vumps = VUMPS(NN_interaction=IsingInteraction())
