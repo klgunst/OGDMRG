@@ -137,11 +137,13 @@ class OGDMRG:
         E: The current energy per site
         Etot: The current total energy of the system
     """
-    def __init__(self, NN_interaction=None):
+    def __init__(self, NN_interaction=None, compare_back=1):
         """Initializes the OGDMRG object.
 
         Args:
             NN_interaction: The nearest neighbour interaction.
+            compare_back: With how many Al's back the current Al should be
+            guage fixed.
 
             If None assume Heisenberg interaction.
 
@@ -154,6 +156,7 @@ class OGDMRG:
             self.NN_interaction = HeisenbergInteraction()
         else:
             self.NN_interaction = NN_interaction
+        self.compare_back = compare_back
 
         self.HL = np.zeros((self.M, self.p, self.M, self.p))
         self.HR = np.zeros((self.p, self.M, self.p, self.M))
@@ -197,17 +200,21 @@ class OGDMRG:
             self._A_deque.appendleft(A)
         except AttributeError:
             # The deque is not initialized yet
-            self._A_deque = deque(maxlen=2)
+            self._A_deque = deque(maxlen=self.compare_back + 1)
             self._A_deque.appendleft(A)
 
     @property
     def A_diff(self):
         """The difference between the current A and the one two iterations ago.
         """
+        if len(self._A_deque) <= self.compare_back:
+            raise ValueError
+
         A1 = self._A_deque[0].reshape(-1, self._A_deque[0].shape[-1])
-        A2 = self._A_deque[-1].reshape(-1, self._A_deque[-1].shape[-1])
+        A2 = self._A_deque[self.compare_back].reshape(
+            -1, self._A_deque[self.compare_back].shape[-1])
         c1 = self._c_deque[0]
-        c2 = self._c_deque[-1]
+        c2 = self._c_deque[self.compare_back]
         XX = c1.conj().T @ A1.conj().T @ A2 @ c2
         return norm(XX - c1.conj().T @ c2)
 
@@ -229,7 +236,7 @@ class OGDMRG:
             self._B_deque.appendleft(B)
         except AttributeError:
             # The deque is not initialized yet
-            self._B_deque = deque(maxlen=2)
+            self._B_deque = deque(maxlen=self.compare_back + 1)
             self._B_deque.appendleft(B)
 
     @property
@@ -244,7 +251,7 @@ class OGDMRG:
             self._c_deque.appendleft(c)
         except AttributeError:
             # The deque is not initialized yet
-            self._c_deque = deque(maxlen=2)
+            self._c_deque = deque(maxlen=self.compare_back + 1)
             self._c_deque.appendleft(c)
 
     def Heff(self, x):
@@ -305,18 +312,21 @@ class OGDMRG:
         # fixing the guage
         u = u[:, :D]
         v = v[:D, :]
-        if D == self.M and D == self.A.shape[0]:
-            totD = len(s)
-            totD = D
-            AAx = u.conj().reshape(-1, totD).T @ self.A.reshape(-1, self.M)
+        cid = self.compare_back - 1
+        flag = hasattr(self, '_A_deque') and \
+            len(self._A_deque) > cid
+        if flag and self.M == self._A_deque[cid].shape[0] \
+                and D == self._A_deque[cid].shape[-1]:
+            AAx = u.conj().reshape(-1, D).T @ \
+                self._A_deque[cid].reshape(-1, D)
             u2, s2, v2 = svd(AAx, full_matrices=False)
-            # print("unitary dist", np.max(abs(s2 - 1)))
             Q = u2 @ v2
             u = u @ Q
             c = Q.conj().T @ np.diag(s[:D] / norm(s[:D]))
             uni1 = np.max(abs(s2 - 1))
 
-            BBx = self.B.reshape(self.M, -1) @ v.reshape(totD, -1).conj().T
+            BBx = self._B_deque[cid].reshape(D, -1) @ \
+                v.reshape(D, -1).conj().T
             u2, s2, v2 = svd(BBx, full_matrices=False)
             Q = u2 @ v2
             v = Q @ v
@@ -717,9 +727,9 @@ if __name__ == '__main__':
         D = [16]
 
     ogdmrg = OGDMRG(NN_interaction=IsingInteraction())
-    ogdmrg = OGDMRG(NN_interaction=HeisenbergInteraction())
+    ogdmrg = OGDMRG(NN_interaction=HeisenbergInteraction(), compare_back=2)
     # vumps = VUMPS(NN_interaction=four_site(HeisenbergInteraction()))
     # vumps = VUMPS(NN_interaction=IsingInteraction())
     for d in D:
         # vumps.kernel(D=d, max_iter=100, canon=True)
-        ogdmrg.kernel(D=d, max_iter=10000, sites=4, verbosity=3)
+        ogdmrg.kernel(D=d, max_iter=10000, sites=2, verbosity=3)
