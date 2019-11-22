@@ -110,6 +110,25 @@ def IsingInteraction(multipl=2, J=4):
     return H.reshape((multipl,) * 4)
 
 
+def H_2site(NN_interaction, AA):
+    """Executes the nearest neighbour interaction on a two-site tensor
+    """
+    assert len(AA.shape) == 4
+    ppdim = AA.shape[1] * AA.shape[2]
+    newshape = (AA.shape[0], ppdim, AA.shape[-1])
+    result = np.zeros(newshape, dtype=AA.dtype)
+
+    AA = AA.reshape(newshape)
+    NN = NN_interaction.reshape(ppdim, ppdim)
+    if AA.shape[0] < AA.shape[-1]:
+        for i in range(AA.shape[0]):
+            result[i] = NN @ AA[i]
+    else:
+        for i in range(AA.shape[-1]):
+            result[:, :, i] = AA[:, :, i] @ NN.T
+    return result
+
+
 class OGDMRG:
     """
     Attributes:
@@ -256,7 +275,7 @@ class OGDMRG:
             )
             result = result.reshape(newshape)
             x = x.reshape(newshape)
-            result += np.einsum('xyij,lijr->lxyr', self.NN_interaction, x)
+            result += H_2site(self.NN_interaction, x).reshape(newshape)
         return result.ravel()
 
     def renormalize_basis(self, A2, D, tol=1e-13):
@@ -295,11 +314,19 @@ class OGDMRG:
             # print("unitary dist", np.max(abs(s2 - 1)))
             Q = u2 @ v2
             u = u @ Q
+            c = Q.conj().T @ np.diag(s[:D])
 
             BBx = self.B.reshape(self.M, -1) @ v.reshape(totD, -1).conj().T
             u2, s2, v2 = svd(BBx, full_matrices=False)
             Q = u2 @ v2
             v = Q @ v
+            c = c @ Q.conj().T
+            print("norm", norm(
+                (u.reshape(-1, D) @ c).ravel() - (c @ v.reshape(D, -1)).ravel()
+            ))
+            print("norm", norm(
+                (u.reshape(-1, D) @ c).ravel() + (c @ v.reshape(D, -1)).ravel()
+            ))
 
         self.B = v.reshape(D, *(self.p,) * hsites, self.M)
         self.A = u.reshape(self.M, *(self.p,) * hsites, D)
@@ -307,52 +334,41 @@ class OGDMRG:
         return s[D:] @ s[D:]
 
     def update_Heff(self):
-        """Update the effective Hamiltonian for the new renormalized basis.
+        """Update the both left and right effective Hamiltonian for the
+        new renormalized basis.
         """
-        # Left environment update
+        self.HL = self.uHeff(self.A, self.NN_interaction, self.HL)
+        self.HR = self.uHeff(
+            self.B.conj().T,
+            self.NN_interaction.conj().T,
+            self.HR.conj().T).conj().T
+
+    def uHeff(self, A, NN, Hc):
+        """Update the effective Hamiltonian for the new renormalized basis
+        """
         oldM = self.A.shape[0]
         hsites = self.nrsites // 2
         ptot = self.p ** hsites
         Mp = oldM * self.p
 
-        A = self.A.reshape(Mp, -1)
-        tH = (self.HL.reshape(Mp, Mp) @ A).reshape(oldM * ptot, self.M)
-        tH = self.A.reshape(oldM * ptot, self.M).T @ tH
+        A = A.reshape(Mp, -1)
+        tH = (Hc.reshape(Mp, Mp) @ A).reshape(oldM * ptot, self.M)
+        tH = A.reshape(oldM * ptot, self.M).T @ tH
         for i in range(hsites - 1):
             newshape = (
                 oldM * self.p ** i,
                 self.p, self.p,
                 self.p ** (hsites - i - 2) * self.M
             )
-            tA = np.einsum('xyij,lijr->lxyr', self.NN_interaction,
-                           self.A.reshape(newshape))
-            tH += self.A.reshape(-1, self.M).T @ tA.reshape(-1, self.M)
-        self.HL = np.kron(tH, np.eye(self.p))
-        self.HL = self.HL.reshape(self.M, self.p, self.M, self.p)
+            tA = H_2site(NN, A.reshape(newshape))
+            tH += A.reshape(-1, self.M).T @ tA.reshape(-1, self.M)
+        Hc = np.kron(tH, np.eye(self.p))
+        Hc = Hc.reshape(self.M, self.p, self.M, self.p)
 
-        A = self.A.reshape(-1, self.p * self.M)
+        A = A.reshape(-1, self.p * self.M)
         X = (A.T @ A).reshape(self.p, self.M, self.p, self.M)
-        self.HL += np.einsum('ibjc,ikjl->bkcl', X, self.NN_interaction)
-
-        # Right environment update
-        B = self.B.reshape(-1, Mp)
-        tH = (B @ self.HR.reshape(Mp, Mp).T).reshape(self.M, oldM * ptot)
-        tH = tH @ self.B.reshape(self.M, oldM * ptot).T
-        for i in range(hsites - 1):
-            newshape = (
-                self.M * self.p ** i,
-                self.p, self.p,
-                self.p ** (hsites - i - 2) * oldM
-            )
-            tB = np.einsum('xyij,lijr->lxyr', self.NN_interaction,
-                           self.B.reshape(newshape))
-            tH += self.B.reshape(self.M, -1) @ tB.reshape(self.M, -1).T
-        self.HR = np.kron(np.eye(self.p), tH)
-        self.HR = self.HR.reshape(self.p, self.M, self.p, self.M)
-
-        B = self.B.reshape(self.M * self.p, -1)
-        X = (B @ B.T).reshape(self.M, self.p, self.M, self.p)
-        self.HR += np.einsum('bicj,kilj->kblc', X, self.NN_interaction)
+        Hc += np.einsum('ibjc,ikjl->bkcl', X, NN)
+        return Hc
 
     def kernel(self, D=16, sites=2, max_iter=100, tol=1e-6, verbosity=2):
         """Executing of the DMRG algorithm.
@@ -509,14 +525,8 @@ class VUMPS:
         return E, norm(HAcAc - 2 * AlHcc) / (2 * abs(E))
 
     def H_2site(self, AA):
-        """Executes the nearest neighbour interaction on a two-site tensor
-        """
-        result = np.zeros((self.M, self.p * self.p, self.M), dtype=self._dtype)
-        AA = AA.reshape(self.M, self.p * self.p, self.M)
-        NN = self.NN_interaction.reshape(self.p * self.p, -1)
-        for i in range(self.M):
-            result[i] = NN @ AA[i]
-        return result
+        return H_2site(self.NN_interaction,
+                       AA.reshape(self.M, self.p, self.p, self.M))
 
     def HAc(self, x):
         # left Heff
@@ -693,8 +703,9 @@ if __name__ == '__main__':
 
     ogdmrg = OGDMRG(NN_interaction=IsingInteraction())
     ogdmrg = OGDMRG(NN_interaction=HeisenbergInteraction())
-    vumps = VUMPS(NN_interaction=four_site(HeisenbergInteraction()))
+    # vumps = VUMPS(NN_interaction=four_site(HeisenbergInteraction()))
     # vumps = VUMPS(NN_interaction=IsingInteraction())
     for d in D:
         # vumps.kernel(D=d, max_iter=100, canon=True)
+        # ogdmrg.kernel(D=d, max_iter=10000, sites=4, tol=None)
         ogdmrg.kernel(D=d, max_iter=10000, sites=4, tol=None)
