@@ -429,8 +429,11 @@ class OGDMRG:
                     print(f"it {i}:\tM: {self.M},\tE: {self.E:.12f},\t"
                           f"ΔE: {ΔE:.3g},\ttrunc: {trunc:.3g}")
 
-            if i > 10 and tol is not None and self.A_diff < tol:
-                break
+            try:
+                if i > 10 and tol is not None and self.A_diff < tol:
+                    break
+            except ValueError:
+                pass
 
         if verbosity >= 1:
             print(f"its: {i},\tM: {self.M},\tE: {self.E:.12f},\t"
@@ -713,7 +716,7 @@ if __name__ == '__main__':
     else:
         D = [16]
 
-    # ogdmrg = OGDMRG(NN_interaction=IsingInteraction(J=1))
+    ogdmrg = OGDMRG(NN_interaction=IsingInteraction())
     ogdmrg = OGDMRG(NN_interaction=HeisenbergInteraction())
     # vumps = VUMPS(NN_interaction=four_site(HeisenbergInteraction()))
     # vumps = VUMPS(NN_interaction=IsingInteraction())
