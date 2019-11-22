@@ -206,11 +206,10 @@ class OGDMRG:
         """
         A1 = self._A_deque[0].reshape(-1, self._A_deque[0].shape[-1])
         A2 = self._A_deque[-1].reshape(-1, self._A_deque[-1].shape[-1])
-        s1 = self._s_deque[0][:A1.shape[-1]]
-        s2 = self._s_deque[-1][:A2.shape[-1]]
-        XX = np.diag(s1) @ A1.T @ A2 @ np.diag(s2)
-        s_diag = np.diag(s1 * s2)
-        return norm(XX - s_diag)
+        c1 = self._c_deque[0]
+        c2 = self._c_deque[-1]
+        XX = c1.conj().T @ A1.conj().T @ A2 @ c2
+        return norm(XX - c1.conj().T @ c2)
 
     @property
     def B(self):
@@ -234,19 +233,19 @@ class OGDMRG:
             self._B_deque.appendleft(B)
 
     @property
-    def s(self):
-        return self._s_deque[0]
+    def c(self):
+        return self._c_deque[0]
 
-    @s.setter
-    def s(self, s):
+    @c.setter
+    def c(self, c):
         from collections import deque
         # A deque is also initialized so to keep track of previous A's
         try:
-            self._s_deque.appendleft(s)
+            self._c_deque.appendleft(c)
         except AttributeError:
             # The deque is not initialized yet
-            self._s_deque = deque(maxlen=2)
-            self._s_deque.appendleft(s)
+            self._c_deque = deque(maxlen=2)
+            self._c_deque.appendleft(c)
 
     def Heff(self, x):
         """Executing the Effective Hamiltonian on the two-site object `x`.
@@ -314,24 +313,33 @@ class OGDMRG:
             # print("unitary dist", np.max(abs(s2 - 1)))
             Q = u2 @ v2
             u = u @ Q
-            c = Q.conj().T @ np.diag(s[:D])
+            c = Q.conj().T @ np.diag(s[:D] / norm(s[:D]))
+            uni1 = np.max(abs(s2 - 1))
 
             BBx = self.B.reshape(self.M, -1) @ v.reshape(totD, -1).conj().T
             u2, s2, v2 = svd(BBx, full_matrices=False)
             Q = u2 @ v2
             v = Q @ v
             c = c @ Q.conj().T
-            print("norm", norm(
-                (u.reshape(-1, D) @ c).ravel() - (c @ v.reshape(D, -1)).ravel()
-            ))
-            print("norm", norm(
-                (u.reshape(-1, D) @ c).ravel() + (c @ v.reshape(D, -1)).ravel()
-            ))
+
+            Alc = u.reshape(-1, D) @ c
+            cAr = c @ v.reshape(D, -1)
+            λ = np.dot(Alc.ravel(), cAr.conj().ravel())
+            uni2 = np.max(abs(s2 - 1))
+            info = {
+                'Alc - λ cAr': norm(Alc.ravel() - λ * cAr.ravel()),
+                '|λ|': abs(λ),
+                'Q_error': uni1,
+                'P_error': uni2
+            }
+            self.c = c
+        else:
+            self.c = np.diag(s[:D])
+            info = None
 
         self.B = v.reshape(D, *(self.p,) * hsites, self.M)
         self.A = u.reshape(self.M, *(self.p,) * hsites, D)
-        self.s = s
-        return s[D:] @ s[D:]
+        return s[D:] @ s[D:], info
 
     def update_Heff(self):
         """Update the both left and right effective Hamiltonian for the
@@ -339,9 +347,8 @@ class OGDMRG:
         """
         self.HL = self.uHeff(self.A, self.NN_interaction, self.HL)
         self.HR = self.uHeff(
-            self.B.conj().T,
-            self.NN_interaction.conj().T,
-            self.HR.conj().T).conj().T
+            self.B.conj().T, self.NN_interaction.conj().T, self.HR.T
+        ).T
 
     def uHeff(self, A, NN, Hc):
         """Update the effective Hamiltonian for the new renormalized basis
@@ -353,7 +360,7 @@ class OGDMRG:
 
         A = A.reshape(Mp, -1)
         tH = (Hc.reshape(Mp, Mp) @ A).reshape(oldM * ptot, self.M)
-        tH = A.reshape(oldM * ptot, self.M).T @ tH
+        tH = A.reshape(oldM * ptot, self.M).conj().T @ tH
         for i in range(hsites - 1):
             newshape = (
                 oldM * self.p ** i,
@@ -361,16 +368,16 @@ class OGDMRG:
                 self.p ** (hsites - i - 2) * self.M
             )
             tA = H_2site(NN, A.reshape(newshape))
-            tH += A.reshape(-1, self.M).T @ tA.reshape(-1, self.M)
+            tH += A.reshape(-1, self.M).conj().T @ tA.reshape(-1, self.M)
         Hc = np.kron(tH, np.eye(self.p))
         Hc = Hc.reshape(self.M, self.p, self.M, self.p)
 
         A = A.reshape(-1, self.p * self.M)
-        X = (A.T @ A).reshape(self.p, self.M, self.p, self.M)
+        X = (A.conj().T @ A).reshape(self.p, self.M, self.p, self.M)
         Hc += np.einsum('ibjc,ikjl->bkcl', X, NN)
         return Hc
 
-    def kernel(self, D=16, sites=2, max_iter=100, tol=1e-6, verbosity=2):
+    def kernel(self, D=16, sites=2, max_iter=100, tol=1e-15, verbosity=2):
         """Executing of the DMRG algorithm.
 
         Args:
@@ -382,7 +389,7 @@ class OGDMRG:
 
             max_iter: The maximal iterations to use in the DMRG algorithm.
 
-            tol: The Energy tolerance on which to abort the calculation
+            tol: The tolerance on which to abort the calculation
 
             verbosity: 0: Don't print anything.
                        1: Print results for the optimization.
@@ -396,7 +403,8 @@ class OGDMRG:
         for i in range(max_iter):
             H = LinearOperator(
                 (self.M * self.M * (self.p ** self.nrsites),) * 2,
-                matvec=lambda x: self.Heff(x)
+                matvec=lambda x: self.Heff(x),
+                dtype=np.complex128
             )
             # Diagonalize
             w, v = eigsh(H, k=1, which='SA')
@@ -404,7 +412,10 @@ class OGDMRG:
             E = (w[0] - self.Etot) / self.nrsites
             ΔE, self.E, self.Etot = self.E - E, E, w[0]
 
-            trunc = self.renormalize_basis(v[:, 0], D)
+            trunc, info = self.renormalize_basis(v[:, 0], D)
+            if info is not None and verbosity >= 3:
+                print(info)
+
             # Update the effective Hamiltonian
             self.update_Heff()
 
@@ -418,8 +429,9 @@ class OGDMRG:
                     print(f"it {i}:\tM: {self.M},\tE: {self.E:.12f},\t"
                           f"ΔE: {ΔE:.3g},\ttrunc: {trunc:.3g}")
 
-            if tol is not None and abs(ΔE) < tol:
+            if i > 10 and tol is not None and self.A_diff < tol:
                 break
+
         if verbosity >= 1:
             print(f"its: {i},\tM: {self.M},\tE: {self.E:.12f},\t"
                   f"ΔE: {ΔE:.3g},\ttrunc: {trunc:.3g}")
@@ -701,11 +713,10 @@ if __name__ == '__main__':
     else:
         D = [16]
 
-    ogdmrg = OGDMRG(NN_interaction=IsingInteraction())
+    # ogdmrg = OGDMRG(NN_interaction=IsingInteraction(J=1))
     ogdmrg = OGDMRG(NN_interaction=HeisenbergInteraction())
     # vumps = VUMPS(NN_interaction=four_site(HeisenbergInteraction()))
     # vumps = VUMPS(NN_interaction=IsingInteraction())
     for d in D:
         # vumps.kernel(D=d, max_iter=100, canon=True)
-        # ogdmrg.kernel(D=d, max_iter=10000, sites=4, tol=None)
-        ogdmrg.kernel(D=d, max_iter=10000, sites=4, tol=None)
+        ogdmrg.kernel(D=d, max_iter=10000, sites=4, verbosity=3)
