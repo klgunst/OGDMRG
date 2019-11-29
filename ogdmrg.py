@@ -280,7 +280,23 @@ class OGDMRG:
         """
         hsites = self.nrsites // 2
         u, s, v = svd(A2.reshape((self.M * self.p ** hsites,) * 2))
-        D = min(D, len(s))
+        svd_diff = (s[:-1] - s[1:])
+
+        # Array with Trues every time this singular value is different than the
+        # previous one (up to a tolerance)
+        new_sval = np.concatenate(
+            ([0], np.where(svd_diff > tol)[0] + 1, [len(s)])
+        )
+        # Truncating renormalized basis
+        #
+        # The kept basis states can be larger than te one specified by the
+        # user, we just try not to cut up degenerate singular values.
+        lastmultiplet = -1 if new_sval[-1] < D else np.argmax(new_sval >= D)
+
+        # Dimension of full multiplet
+        Df = new_sval[lastmultiplet]
+        # Make sure bond dimension does not explode
+        D = D if Df > 20 + D else Df
 
         # fixing the guage
         # Only if the dimensions were constant during this and previous step
@@ -641,7 +657,8 @@ class VUMPS:
             info = [0]
         return info
 
-    def kernel(self, D=16, max_iter=1000, tol=1e-10, verbosity=2, canon=True):
+    def kernel(self, D=16, max_iter=1000, tol=1e-10, verbosity=2, canon=True,
+               Ac=None, c=None):
         def print_info(i, vumps, ctol, w1, w2, canon_info):
             print(
                 f'it: {i},\t'
