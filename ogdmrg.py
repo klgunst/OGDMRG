@@ -5,6 +5,21 @@ from scipy.linalg import polar, svd
 from scipy.sparse.linalg import bicgstab, eigs, eigsh, LinearOperator
 
 
+def transfer_eig(A, B):
+    assert len(A.shape)
+    assert A.size == B.size
+    assert A.shape[0] == A.shape[-1]
+    D = A.shape[0]
+
+    def Transfer(x):
+        xA = x.reshape(D, D) @ A.reshape(D, -1)
+        return (B.reshape(-1, D).conj().T @ xA.reshape(-1, D)).ravel()
+
+    LO = LinearOperator((D ** 2,) * 2, matvec=Transfer)
+    w, v = eigs(LO, k=1, which='LM')
+    return w[0], v[:, 0]
+
+
 def canonicalize(Ar, c_in=None, tol=1e-14, dtype=np.float64):
     assert len(Ar.shape) == 3
     M = Ar.shape[-1]
@@ -14,19 +29,10 @@ def canonicalize(Ar, c_in=None, tol=1e-14, dtype=np.float64):
     diff = 1
     iterations = 1
     while diff > tol:
-        def Transfer(x, A):
-            xA = x.reshape(M, M) @ A.reshape(M, -1)
-            return (A.reshape(-1, M).conj().T @ xA.reshape(-1, M)).ravel()
+        A = A.reshape(M, -1, M)
+        _, v = transfer_eig(A, A)
 
-        iterations += 1
-        LO = LinearOperator(
-            (M ** 2,) * 2,
-            matvec=lambda x: Transfer(x, A),
-            dtype=dtype
-        )
-        w, v = eigs(LO, k=1, which='LM')
-
-        U, s, Vh = svd(v[:, 0].reshape(M, M))
+        U, s, Vh = svd(v.reshape(M, M))
         sqrt_eps = np.sqrt(np.finfo(dtype).eps)
         s = np.array([max(np.sqrt(st), sqrt_eps) for st in s])
         s = s / norm(s)
@@ -38,7 +44,7 @@ def canonicalize(Ar, c_in=None, tol=1e-14, dtype=np.float64):
 
         c = c1 @ c
         c = c / norm(c)
-        diff = norm(v[:, 0].reshape(M, M) - np.eye(M) * v.flatten()[0])
+        diff = norm(v.reshape(M, M) - np.eye(M) * v[0])
     assert np.isclose(
         norm(A.reshape(-1, M).conj().T @ A.reshape(-1, M) - np.eye(M)), 0
     )
@@ -204,21 +210,6 @@ class OGDMRG:
             self._A_deque.appendleft(A)
 
     @property
-    def A_diff(self):
-        """The difference between the current A and the one two iterations ago.
-        """
-        if len(self._A_deque) <= self.compare_back:
-            raise ValueError
-
-        A1 = self._A_deque[0].reshape(-1, self._A_deque[0].shape[-1])
-        A2 = self._A_deque[self.compare_back].reshape(
-            -1, self._A_deque[self.compare_back].shape[-1])
-        c1 = self._c_deque[0]
-        c2 = self._c_deque[self.compare_back]
-        XX = c1.conj().T @ A1.conj().T @ A2 @ c2
-        return norm(XX - c1.conj().T @ c2)
-
-    @property
     def B(self):
         """The current B-tensor (right canonical tensor).
 
@@ -289,26 +280,10 @@ class OGDMRG:
         """
         hsites = self.nrsites // 2
         u, s, v = svd(A2.reshape((self.M * self.p ** hsites,) * 2))
-        svd_diff = (s[:-1] - s[1:])
-
-        # Array with Trues every time this singular value is different than the
-        # previous one (up to a tolerance)
-        new_sval = np.concatenate(
-            ([0], np.where(svd_diff > tol)[0] + 1, [len(s)])
-        )
-        # Truncating renormalized basis
-        #
-        # The kept basis states can be larger than te one specified by the
-        # user, we just try not to cut up degenerate singular values.
-        lastmultiplet = -1 if new_sval[-1] < D else np.argmax(new_sval >= D)
-
-        # Dimension of full multiplet
-        Df = new_sval[lastmultiplet]
-        # Make sure bond dimension does not explode
-        # D = D if Df > 20 + D else Df
         D = min(D, len(s))
 
         # fixing the guage
+        # Only if the dimensions were constant during this and previous step
         try:
             Acomp = self._A_deque[self.compare_back - 1]
             Bcomp = self._B_deque[self.compare_back - 1]
@@ -318,31 +293,27 @@ class OGDMRG:
             doGuagefix = False
 
         if doGuagefix:
-            u = u[:, :Df]
-            v = v[:Df, :]
-            AAx = u.conj().reshape(-1, Df).T @ Acomp.reshape(-1, D)
+            u = u[:, :D]
+            v = v[:D, :]
+            AAx = u.conj().reshape(-1, D).T @ Acomp.reshape(-1, D)
             u2, s2, v2 = svd(AAx, full_matrices=False)
-
-            Q = u2 @ v2
+            Q, uni1 = u2 @ v2, np.max(abs(s2 - 1))
             u = u @ Q
-            c = Q.conj().T @ np.diag(s[:Df] / norm(s[:Df]))
-            uni1 = np.max(abs(s2 - 1))
 
-            BBx = Bcomp.reshape(D, -1) @ v.reshape(Df, -1).conj().T
+            BBx = Bcomp.reshape(D, -1) @ v.reshape(D, -1).conj().T
             u2, s2, v2 = svd(BBx, full_matrices=False)
-            Q = u2 @ v2
-            v = Q @ v
-            c = c @ Q.conj().T
+            P, uni2 = u2 @ v2, np.max(abs(s2 - 1))
+            v = P @ v
 
-            Alc = u.reshape(-1, D) @ c
-            cAr = c @ v.reshape(D, -1)
-            λ = np.dot(Alc.ravel(), cAr.conj().ravel())
-            uni2 = np.max(abs(s2 - 1))
+            c = Q.conj().T @ np.diag(s[:D] / norm(s[:D])) @ P.conj().T
+            u = u.reshape(self.M, -1, D)
+            v = v.reshape(D, -1, self.M)
             info = {
-                'Alc - λ cAr': norm(Alc.ravel() - λ * cAr.ravel()),
-                '|λ|': abs(λ),
                 'Q_error': uni1,
-                'P_error': uni2
+                'P_error': uni2,
+                'Al TF': 1 - abs(transfer_eig(u, Acomp)[0]),
+                'Ar TF': 1 - abs(transfer_eig(v, Bcomp)[0]),
+                'ArAl TF': 1 - abs(transfer_eig(u, v)[0])
             }
             self.c = c
         else:
@@ -414,6 +385,7 @@ class OGDMRG:
 
         self.nrsites = sites
 
+        AA = None
         for i in range(max_iter):
             H = LinearOperator(
                 (self.M * self.M * (self.p ** self.nrsites),) * 2,
@@ -421,32 +393,36 @@ class OGDMRG:
                 dtype=np.complex128
             )
             # Diagonalize
-            w, v = eigsh(H, k=1, which='SA')
+            AA = AA if AA is not None and AA.size == H.shape[0] else None
+            w, v = eigsh(H, v0=AA, k=1, which='SA')
+
+            AA = v[:, 0]
             # Renormalize the basis
             E = (w[0] - self.Etot) / self.nrsites
             ΔE, self.E, self.Etot = self.E - E, E, w[0]
 
-            trunc, info = self.renormalize_basis(v[:, 0], D)
+            trunc, info = self.renormalize_basis(AA, D)
             if info is not None and verbosity >= 3:
                 print(info)
+
+            error = info['ArAl TF'] if info is not None else None
 
             # Update the effective Hamiltonian
             self.update_Heff()
 
             # Energy difference between this and the previous even-length chain
             if verbosity >= 2:
-                try:
-                    print(f"it {i}:\tM: {self.M},\tE: {self.E:.12f},\t"
-                          f"ΔE: {ΔE:.3g},\ttrunc: {trunc:.3g},\t"
-                          f"A_diff {self.A_diff}")
-                except ValueError:
-                    print(f"it {i}:\tM: {self.M},\tE: {self.E:.12f},\t"
-                          f"ΔE: {ΔE:.3g},\ttrunc: {trunc:.3g}")
-
+                print(f"it {i}:\tM: {self.M},\tE: {self.E:.12f},\t"
+                      f"ΔE: {ΔE:.3g},\ttrunc: {trunc:.3g}", end='')
+                if error is None:
+                    print()
+                else:
+                    print(f',\tError: {error}')
             try:
-                if i > 10 and tol is not None and self.A_diff < tol:
+                if error < tol:
                     break
-            except ValueError:
+            except TypeError:
+                # error or tol is None
                 pass
 
         if verbosity >= 1:
@@ -456,6 +432,10 @@ class OGDMRG:
                 print("Convergence not reached.")
 
         return self.E
+
+    def vumps(self, **kwargs):
+        """Returns a vumps instance.
+        """
 
 
 class VUMPS:
@@ -730,10 +710,11 @@ if __name__ == '__main__':
     else:
         D = [16]
 
-    # ogdmrg = OGDMRG(NN_interaction=IsingInteraction(J=3.8))
-    ogdmrg = OGDMRG(NN_interaction=HeisenbergInteraction(), compare_back=2)
-    # vumps = VUMPS(NN_interaction=four_site(HeisenbergInteraction()))
+    ogdmrg = OGDMRG(NN_interaction=IsingInteraction(J=4))
+    # ogdmrg = OGDMRG(NN_interaction=HeisenbergInteraction(), compare_back=2)
+    ogdmrg = OGDMRG(NN_interaction=HeisenbergInteraction())
+    vumps = VUMPS(NN_interaction=four_site(HeisenbergInteraction()))
     # vumps = VUMPS(NN_interaction=IsingInteraction())
     for d in D:
-        # vumps.kernel(D=d, max_iter=100, canon=True)
-        ogdmrg.kernel(D=d, max_iter=10000, sites=2, verbosity=3)
+        # vumps.kernel(D=d, max_iter=1000, canon=True)
+        ogdmrg.kernel(D=d, max_iter=10000, sites=4, tol=1e-7, verbosity=3)
