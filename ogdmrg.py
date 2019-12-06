@@ -3,11 +3,11 @@ from numpy.random import rand
 from numpy.linalg import norm
 from scipy.linalg import polar, svd
 from scipy.sparse.linalg import bicgstab, eigs, eigsh, LinearOperator
-
-import unittest
-
 from numpy import einsum
-# from pyscf.lib import einsum
+import unittest
+from numpy.testing import assert_allclose
+
+from pyscf.lib import davidson
 
 
 def transfer_eig(A, B):
@@ -272,6 +272,26 @@ class OGDMRG:
             result += H_2site(self.NN_interaction, x).reshape(newshape)
         return result.ravel()
 
+    def Heffdiagonal(self):
+        """Returns diagonal for the Heff."""
+        diag = np.zeros(self.M * self.M * (self.p ** self.nrsites))
+        diag = diag.reshape(self.M * self.p, -1)
+        diag += self.HL.reshape(self.M * self.p, -1).diagonal()[:, None]
+
+        diag = diag.reshape(-1, self.M * self.p)
+        diag += self.HR.reshape(-1, self.M * self.p).diagonal()[None, :]
+
+        for i in range(self.nrsites - 1):
+            newshape = (
+                self.M * self.p ** i,
+                self.p * self.p,
+                self.p ** (self.nrsites - i - 2) * self.M
+            )
+            diag = diag.reshape(newshape)
+            diag += self.NN_interaction.reshape(
+                self.p * self.p, -1).diagonal()[None, :, None]
+        return diag.ravel()
+
     def renormalize_basis(self, A2, D, tol=1e-13):
         """Renormalize the basis.
         """
@@ -400,19 +420,17 @@ class OGDMRG:
 
         AA = None
         for i in range(max_iter):
-            H = LinearOperator(
-                (self.M * self.M * (self.p ** self.nrsites),) * 2,
-                matvec=lambda x: self.Heff(x),
-                dtype=np.complex128
-            )
             # Diagonalize
-            AA = AA if AA is not None and AA.size == H.shape[0] else None
-            w, v = eigsh(H, v0=AA, k=1, which='SA')
+            size = self.M * self.M * (self.p ** self.nrsites)
+            if AA is None or AA.size != size:
+                AA = rand(size)
+                AA /= norm(AA)
+            w, v = davidson(self.Heff, x0=AA, precond=self.Heffdiagonal())
 
-            AA = v[:, 0]
+            AA = v
             # Renormalize the basis
-            E = (w[0] - self.Etot) / self.nrsites
-            ΔE, self.E, self.Etot = self.E - E, E, w[0]
+            E = (w - self.Etot) / self.nrsites
+            ΔE, self.E, self.Etot = self.E - E, E, w
 
             trunc, info = self.renormalize_basis(AA, D)
             if info is not None and verbosity >= 3:
@@ -720,25 +738,44 @@ class VUMPS:
 
 
 class TestDMRG(unittest.TestCase):
+    verbosity = 0
+
+    def test_DMRG_diagonal(self):
+        ogdmrg = OGDMRG(NN_interaction=IsingInteraction())
+        ogdmrg.kernel(D=16, max_iter=50, tol=1e-9, verbosity=self.verbosity)
+        diag = ogdmrg.Heffdiagonal()
+
+        def cdiag(i):
+            x = np.zeros(len(diag))
+            x[i] = 1.
+            return ogdmrg.Heff(x)[i]
+
+        calcdiag = np.array([cdiag(i) for i in range(len(diag))])
+        assert_allclose(calcdiag, diag)
+
     def test_DMRG_criticalIsing(self):
         ogdmrg = OGDMRG(NN_interaction=IsingInteraction())
-        E = ogdmrg.kernel(D=16, max_iter=10000, tol=1e-9, verbosity=0)
-        np.testing.assert_allclose(E, -1.273238747142841)
+        E = ogdmrg.kernel(D=16, max_iter=1000, tol=1e-9,
+                          verbosity=self.verbosity)
+        assert_allclose(E, -1.273238747142841)
 
     def test_DMRG_Heisenberg(self):
         ogdmrg = OGDMRG(NN_interaction=HeisenbergInteraction())
-        E = ogdmrg.kernel(D=16, max_iter=1000, sites=4, tol=1e-10, verbosity=0)
-        np.testing.assert_allclose(E, -0.4430946668996967)
+        E = ogdmrg.kernel(D=16, max_iter=1000, sites=4, tol=1e-10,
+                          verbosity=self.verbosity)
+        assert_allclose(E, -0.4430946668996967)
 
     def test_VUMPS_Heisenberg(self):
         ogdmrg = VUMPS(NN_interaction=four_site(HeisenbergInteraction()))
-        E = ogdmrg.kernel(D=16, max_iter=1000, tol=1e-10, verbosity=0)
-        np.testing.assert_allclose(E, -0.4431114747297753)
+        E = ogdmrg.kernel(D=16, max_iter=1000, tol=1e-10,
+                          verbosity=self.verbosity)
+        assert_allclose(E, -0.4431114747297753)
 
     def test_VUMPS_criticalIsing(self):
         ogdmrg = VUMPS(NN_interaction=IsingInteraction())
-        E = ogdmrg.kernel(D=16, max_iter=1000, tol=1e-10, verbosity=0)
-        np.testing.assert_allclose(E, -1.273238977704085)
+        E = ogdmrg.kernel(D=16, max_iter=1000, tol=1e-10,
+                          verbosity=self.verbosity)
+        assert_allclose(E, -1.273238977704085)
 
 
 if __name__ == '__main__':
