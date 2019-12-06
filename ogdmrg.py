@@ -4,6 +4,11 @@ from numpy.linalg import norm
 from scipy.linalg import polar, svd
 from scipy.sparse.linalg import bicgstab, eigs, eigsh, LinearOperator
 
+import unittest
+
+from numpy import einsum
+# from pyscf.lib import einsum
+
 
 def transfer_eig(A, B):
     assert len(A.shape)
@@ -122,17 +127,9 @@ def H_2site(NN_interaction, AA):
     assert len(AA.shape) == 4
     ppdim = AA.shape[1] * AA.shape[2]
     newshape = (AA.shape[0], ppdim, AA.shape[-1])
-    result = np.zeros(newshape, dtype=AA.dtype)
-
     AA = AA.reshape(newshape)
     NN = NN_interaction.reshape(ppdim, ppdim)
-    if AA.shape[0] < AA.shape[-1]:
-        for i in range(AA.shape[0]):
-            result[i] = NN @ AA[i]
-    else:
-        for i in range(AA.shape[-1]):
-            result[:, :, i] = AA[:, :, i] @ NN.T
-    return result
+    return einsum('ij,ajb->aib', NN, AA)
 
 
 class OGDMRG:
@@ -375,7 +372,7 @@ class OGDMRG:
 
         A = A.reshape(-1, self.p * self.M)
         X = (A.conj().T @ A).reshape(self.p, self.M, self.p, self.M)
-        Hc += np.einsum('ibjc,ikjl->bkcl', X, NN)
+        Hc += einsum('ibjc,ikjl->bkcl', X, NN)
         return Hc
 
     def kernel(self, D=16, sites=2, max_iter=100, tol=1e-15, verbosity=2):
@@ -435,7 +432,7 @@ class OGDMRG:
                 else:
                     print(f',\tError: {error}')
             try:
-                if error < tol:
+                if i > 10 and error < tol:
                     break
             except TypeError:
                 # error or tol is None
@@ -620,7 +617,8 @@ class VUMPS:
                             dtype=self._dtype
                             )
 
-        r, info = bicgstab(LO, (h - P_NullSpace(h)).ravel(), tol=tol)
+        r, info = bicgstab(LO, (h - P_NullSpace(h)).ravel(), tol=tol,
+                           atol='legacy')
 
         # return (1 - P) @ result
         r = r.reshape(self.M, self.M)
@@ -718,20 +716,30 @@ class VUMPS:
 
         if verbosity >= 1:
             print_info(i, self, ctol, w1[0], w2[0], canon_info[0])
+        return self.energy
+
+
+class TestDMRG(unittest.TestCase):
+    def test_DMRG_criticalIsing(self):
+        ogdmrg = OGDMRG(NN_interaction=IsingInteraction())
+        E = ogdmrg.kernel(D=16, max_iter=10000, tol=1e-9, verbosity=0)
+        np.testing.assert_allclose(E, -1.273238747142841)
+
+    def test_DMRG_Heisenberg(self):
+        ogdmrg = OGDMRG(NN_interaction=HeisenbergInteraction())
+        E = ogdmrg.kernel(D=16, max_iter=1000, sites=4, tol=1e-10, verbosity=0)
+        np.testing.assert_allclose(E, -0.4430946668996967)
+
+    def test_VUMPS_Heisenberg(self):
+        ogdmrg = VUMPS(NN_interaction=four_site(HeisenbergInteraction()))
+        E = ogdmrg.kernel(D=16, max_iter=1000, tol=1e-10, verbosity=0)
+        np.testing.assert_allclose(E, -0.4431114747297753)
+
+    def test_VUMPS_criticalIsing(self):
+        ogdmrg = VUMPS(NN_interaction=IsingInteraction())
+        E = ogdmrg.kernel(D=16, max_iter=1000, tol=1e-10, verbosity=0)
+        np.testing.assert_allclose(E, -1.273238977704085)
 
 
 if __name__ == '__main__':
-    from sys import argv
-    if len(argv) > 1:
-        D = [int(d) for d in argv[1:]]
-    else:
-        D = [16]
-
-    ogdmrg = OGDMRG(NN_interaction=IsingInteraction(J=4))
-    # ogdmrg = OGDMRG(NN_interaction=HeisenbergInteraction(), compare_back=2)
-    ogdmrg = OGDMRG(NN_interaction=HeisenbergInteraction())
-    vumps = VUMPS(NN_interaction=four_site(HeisenbergInteraction()))
-    # vumps = VUMPS(NN_interaction=IsingInteraction())
-    for d in D:
-        # vumps.kernel(D=d, max_iter=1000, canon=True)
-        ogdmrg.kernel(D=d, max_iter=10000, sites=4, tol=1e-7, verbosity=3)
+    unittest.main()
