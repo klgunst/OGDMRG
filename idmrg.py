@@ -2,12 +2,27 @@ import numpy as np
 from numpy.random import rand
 from numpy.linalg import norm
 from scipy.linalg import polar, svd
-from scipy.sparse.linalg import eigs, eigsh, LinearOperator
+from scipy.sparse.linalg import eigsh, LinearOperator
 from numpy import einsum
+from ogdmrg import IsingInteraction
 
 
-def NN_to_MPO(NN):
-    pass
+def NN_to_MPO(NN, tol=1e-12):
+    NN = NN.transpose([0, 2, 1, 3])
+    pdim = NN.shape[0]
+    u, s, v = svd(NN.reshape(pdim * pdim, pdim * pdim))
+    accept = s > tol
+    u = u[:, accept].reshape(pdim, pdim, -1)
+    v = (s[accept, None] * v[accept, :]).reshape(-1, pdim, pdim)
+    MPOdim = sum(accept) + 2
+
+    MPO = np.zeros((MPOdim, pdim, MPOdim, pdim))
+    MPO[0, :, 0, :] = np.eye(pdim)
+    MPO[-1, :, -1, :] = np.eye(pdim)
+    MPO[0, :, 1:-1, :] = u.transpose([1, 2, 0])
+    MPO[1:-1, :, -1, :] = v.transpose([0, 2, 1])
+
+    return MPO
 
 
 class Environment:
@@ -43,18 +58,19 @@ class Environment:
             site_index = index + (0 if self.reverse else -1)
             penv = self[pbond_index]
             A = self._idmrg.sites[site_index]
-            canon = self._idmrg.canon[site_index]
+            rightCanon = self._idmrg.center_bond <= site_index
 
-            if (self.reverse and canon != "Right") or \
-                    (not self.reverse and canon != "Left"):
+            if self.reverse != rightCanon:
+                canontype = "Right" if rightCanon else "Left"
                 raise IndexError(
                     f"Not able to create environment at {index}, "
-                    f"site {index} is {canon} canonicalized"
+                    f"site {index} is {canontype} canonicalized"
                 )
+
             if self.reverse:
-                contract = 'amb,djb,cia,mijn->cnd'
+                contract = 'anb,dib,cja,minj->cmd'
             else:
-                contract = 'amb,bjd,aic,mijn->cnd'
+                contract = 'amb,bid,ajc,minj->cnd'
 
             self._envs[index] = einsum(contract, penv, A, A.conj(),
                                        self._idmrg.MPO)
@@ -66,12 +82,9 @@ class IDMRG:
 
     Attributes:
         cell_size: The size of the unit cell
-        central_bond: The current central bond in the two unit cells.
+        center_bond: The current central bond in the two unit cells.
         sites: The MPS's for the current two central unit cells.
-
-        Be aware if you change this that you correctly canonicalize the
-        corresponding sites or change the `self.canon` object.
-        canon: "Left" "Central" "Right" for every site in `self.sites`.
+        c: The center tensor.
     """
 
     def __init__(self, MPO, cell_size=1):
@@ -86,23 +99,25 @@ class IDMRG:
         """
         self.cell_size = cell_size
 
-        self._MPO = MPO
+        self.MPO = MPO
         self.MPOdim = MPO.shape[0]
         self.pdim = MPO.shape[1]
-        assert MPO.shape[2] == self.pdim
-        assert MPO.shape[3] == self.MPOdim
+        assert MPO.shape[3] == self.pdim
+        assert MPO.shape[2] == self.MPOdim
 
         # We don't initialize the sites
-        self.sites, self.canon = None, None
+        self.sites, self.center_bond = None, None
         self._pLcel, self._pRcel = None, None
+        self.previous_E = 0
 
         self.LEnvironment = Environment(self, reverse=False)
         self.REnvironment = Environment(self, reverse=True)
 
     @property
-    def MPO(self):
-        return self._MPO.reshape(self.MPOdim, self.pdim,
-                                 self.pdim, self.MPOdim)
+    def energy(self):
+        """Energy per unit cell
+        """
+        return (self.current_E - self.previous_E) / 2 / self.cell_size
 
     @property
     def Lcel(self):
@@ -123,7 +138,7 @@ class IDMRG:
         """
         return self.cell_size * 2
 
-    def kernel(self, D=16, two_site=False, max_iter=100, which='SA',
+    def kernel(self, D=16, two_site=False, max_iter=10, which='SA',
                msweeps=1):
         """Optimize the iDMRG.
 
@@ -140,23 +155,27 @@ class IDMRG:
                 polar(rand(D * self.pdim, D))[0].reshape(D, self.pdim, D)
                 for i in range(self.cell_size)
             ] + [
-                polar(rand(D, self.pdim * D))[0].reshape(D, self.pdim * D)
+                polar(rand(D, self.pdim * D))[0].reshape(D, self.pdim, D)
                 for i in range(self.cell_size)
             ]
-            self.canon = ["Left"] * self.cell_size + ["Right"] * self.cell_size
-            self.central_bond = self.cell_size
+            self.c = rand(D, D)
+            self.c = self.c / norm(self.c)
+            self.center_bond = self.cell_size
 
             # Begin of environment
-            self.LEnvironment[0] = np.zeros((D, self.MPOdim, D))
-            self.LEnvironment[0][:, 0, :] = 1.
+            LE = np.zeros((D, self.MPOdim, D))
+            LE[:, 0, :] = 1.
+            LE = LE / norm(LE)
+            self.LEnvironment[0] = LE
 
             # End of environment
-            self.REnvironment[self.end_bond] = np.zeros((D, self.MPOdim, D))
-            self.REnvironment[0][:, -1, :] = 1.
+            RE = np.zeros((D, self.MPOdim, D))
+            RE[:, -1, :] = 1.
+            RE = RE / norm(RE)
+            self.REnvironment[self.end_bond] = RE
 
         # Two new unit cells are inserted per iteration
         for i in range(max_iter):
-
             # Update the current unit cells
             for j in range(msweeps):
                 self.optimizeUnitCells(D, two_site, which)
@@ -164,7 +183,7 @@ class IDMRG:
             # Insert the two new unit cells
             self.newUnitCells()
 
-        return self.eigenvalue
+        return self.energy
 
     def newUnitCells(self):
         """Insert new unit cells which are copies of the current unitcells.
@@ -175,16 +194,183 @@ class IDMRG:
         #   Setting the left environment in the middle to base left.
         #   Setting the right environment in the middle to base right.
         #   Deleting the other environments.
-        assert self.central_bond == self.cell_size
-        self.LEnvironment[0] = self.LEnvironment[self.central_bond]
-        self.REnvironment[self.end_bond] = self.REnvironment[self.central_bond]
+        assert self.center_bond == self.cell_size
+        self.previous_E = self.current_E
+        self.LEnvironment[0] = self.LEnvironment[self.center_bond]
+        self.REnvironment[self.end_bond] = self.REnvironment[self.center_bond]
 
         # Pushing left and right cells to the previous ones
         self._pLcel = tuple([L.copy() for L in self.Lcel])
         self._pRcel = tuple([R.copy() for R in self.Rcel])
 
+    def _sweep(self, two_site):
+        """Sweeps through the bonds of the two central unit cells starting from
+        the center, first going to the right, then to the left, and then back
+        to the center.
+
+        Args:
+            two_site: True if you are doing two site, False for one site opt.
+
+        Returns:
+            A bunch of info
+        """
+        assert self.center_bond == self.cell_size
+
+        edge = 0 if two_site else 1
+        for i in range(self.cell_size, self.end_bond - 1 + edge):
+            yield {
+                'center_at': 'left',
+                'sites': (i, i + 1) if two_site else (i,),
+                'side': 'right' if i != self.end_bond - 1 else 'left'
+            }
+
+        for i in range(self.end_bond - 1, 1 - edge, -1):
+            yield {
+                'center_at': 'right',
+                'sites': (i - 2, i - 1) if two_site else (i - 1,),
+                'side': 'left' if i != 1 else 'right'
+            }
+        for i in range(1, self.cell_size):
+            yield {
+                'center_at': 'left',
+                'sites': (i, i + 1) if two_site else (i,),
+                'side': 'right' if i != self.end_bond - 1 else 'left'
+            }
+
+        if two_site and self.cell_size == 1:
+            yield {
+                'center_at': 'center',
+                'sites': (0, 1),
+            }
+
+    def make_center_site(self, two_site, info):
+        """Makes the center site (either two-site or one site).
+        """
+        if info['center_at'] == 'center':
+            A1 = self.sites[info['sites'][0]]
+            A2 = self.sites[info['sites'][1]]
+            AA = np.tensordot(A1, self.c, axes=1)
+            AA = np.tensordot(AA, A2, axes=1)
+            info['AAshape'] = AA.shape
+            return AA
+
+        if two_site:
+            A1 = self.sites[info['sites'][0]]
+            A2 = self.sites[info['sites'][1]]
+            AA = np.tensordot(A1, A2, axes=1)
+        else:
+            AA = self.sites[info['sites'][0]]
+        info['AAshape'] = AA.shape
+
+        # Absorb the center site, which is either to the
+        #   * left when moving right
+        #   * right when moving left
+        if info['center_at'] == 'right':
+            return np.tensordot(self.c, AA, axes=1)
+        elif info['center_at'] == 'left':
+            return np.tensordot(AA, self.c, axes=1)
+        else:
+            ValueError(f'Invalid info["center_at"]: {info["center_at"]}')
+
+    def rotate(self, A, site, side):
+        """Rotates the optimized site
+        """
+        return A, np.eye(A.shape[0 if side == 'left' else -1])
+
+    def update_sites(self, AA, two_site, info, D):
+        """Recanonicalizes the updated sites and moves the center.
+
+        Canonicalization is done by minimizing the difference between this
+        site and the equivalent site in the previous unit cell.
+        """
+        sites = info['sites']
+        if two_site:
+            assert len(sites) == 2
+            newshape = (info['AAshape'][0] * info['AAshape'][1], -1)
+            u, s, v = svd(AA.reshape(newshape))
+
+            # Fill in left and right site and center site
+            A1 = u[:, :D].reshape(-1, self.pdim, D)
+            A2 = v[:D, :].reshape(D, self.pdim, -1)
+            self.c = np.diag(s[:D] / norm(s[:D]))
+
+            # fix the guage
+            self.sites[sites[0]], Q = self.rotate(A1, sites[0], 'right')
+            self.sites[sites[1]], P = self.rotate(A2, sites[1], 'left')
+
+            self.sites[sites[0]] = self.sites[sites[0]].reshape(
+                info['AAshape'][0], info['AAshape'][1], -1
+            )
+            self.sites[sites[1]] = self.sites[sites[1]].reshape(
+                -1, info['AAshape'][-2], info['AAshape'][-1]
+            )
+            self.c = Q.conj().T @ self.c @ P.conj().T
+
+            # Setting new center bond
+            self.center_bond = sites[1]
+            self.LEnvironment[self.center_bond] = None
+            self.REnvironment[self.center_bond] = None
+        else:
+            assert len(sites) == 1
+            if info['side'] == "right":
+                newshape = (-1, info['AAshape'][2])
+            elif info['side'] == "left":
+                newshape = (info['AAshape'][0], -1)
+            else:
+                ValueError(f'Invalid info["side"]: {info["side"]}')
+
+            if info['side'] == 'left':
+                newshape = (info['AAshape'][0],  -1)
+            else:
+                newshape = (info['AAshape'][0] * info['AAshape'][1], -1)
+            A, self.c = polar(AA.reshape(newshape), side=info['side'])
+
+            # fix the guage
+            self.sites[sites[0]], Q = self.rotate(A, sites[0], info['side'])
+            self.sites[sites[0]] = \
+                self.sites[sites[0]].reshape(info['AAshape'])
+
+            if info['side'] == "right":
+                self.c = Q.conj().T @ self.c
+                self.center_bond = sites[0] + 1
+                self.LEnvironment[self.center_bond] = None
+            elif info['side'] == "left":
+                self.c = self.c @ Q.conj().T
+                self.center_bond = sites[0]
+                self.REnvironment[self.center_bond] = None
+            else:
+                ValueError(f'Invalid info["side"]: {info["side"]}')
+
+    def Heff(self, AA, two_site, info):
+        AA = AA.reshape(info['AAshape'])
+        lbond = info['sites'][0]
+        rbond = info['sites'][-1] + 1
+
+        result = np.tensordot(self.LEnvironment[lbond], AA, axes=1)
+        result = np.tensordot(result, self.MPO, axes=[[1, 2], [0, 1]])
+        if two_site:
+            result = np.tensordot(result, self.MPO, axes=[[1, 3], [1, 0]])
+        result = np.tensordot(
+            result, self.REnvironment[rbond], axes=[[1, 2 + two_site], [2, 1]]
+            )
+        return result.ravel()
+
     def optimizeUnitCells(self, D, two_site, which):
         """Optimizes the two unit cells.
         """
-        assert not two_site
-        for site in 
+        for info in self._sweep(two_site):
+            print(info)
+            # Create the big site
+            AA = self.make_center_site(two_site, info)
+            H = LinearOperator(
+                (AA.size,) * 2, matvec=lambda x: self.Heff(x, two_site, info)
+            )
+            w, v = eigsh(H, k=1, v0=AA.ravel(), which=which)
+            self.current_E = w[0]
+            print(f'energy: {self.energy}')
+            self.update_sites(v[:, 0], two_site, info, D)
+
+
+if __name__ == '__main__':
+    idmrg = IDMRG(NN_to_MPO(IsingInteraction()))
+    idmrg.kernel(two_site=True, max_iter=240, msweeps=1)
