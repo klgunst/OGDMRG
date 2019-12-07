@@ -4,7 +4,7 @@ from numpy.linalg import norm
 from scipy.linalg import polar, svd
 from scipy.sparse.linalg import eigsh, LinearOperator
 from numpy import einsum
-from ogdmrg import IsingInteraction
+import ogdmrg
 
 
 def NN_to_MPO(NN, tol=1e-12):
@@ -107,7 +107,7 @@ class IDMRG:
 
         # We don't initialize the sites
         self.sites, self.center_bond = None, None
-        self._pLcel, self._pRcel = None, None
+        self._previous_sites = None
         self.previous_E = 0
 
         self.LEnvironment = Environment(self, reverse=False)
@@ -139,7 +139,7 @@ class IDMRG:
         return self.cell_size * 2
 
     def kernel(self, D=16, two_site=False, max_iter=10, which='SA',
-               msweeps=1):
+               msweeps=1, verbosity=1):
         """Optimize the iDMRG.
 
         Args:
@@ -178,10 +178,11 @@ class IDMRG:
         for i in range(max_iter):
             # Update the current unit cells
             for j in range(msweeps):
-                self.optimizeUnitCells(D, two_site, which)
+                self.optimizeUnitCells(D, two_site, which, verbosity)
 
             # Insert the two new unit cells
             self.newUnitCells()
+            print("Inserting cells\n")
 
         return self.energy
 
@@ -200,8 +201,7 @@ class IDMRG:
         self.REnvironment[self.end_bond] = self.REnvironment[self.center_bond]
 
         # Pushing left and right cells to the previous ones
-        self._pLcel = tuple([L.copy() for L in self.Lcel])
-        self._pRcel = tuple([R.copy() for R in self.Rcel])
+        self._previous_sites = tuple([s.copy() for s in self.sites])
 
     def _sweep(self, two_site):
         """Sweeps through the bonds of the two central unit cells starting from
@@ -265,9 +265,9 @@ class IDMRG:
         # Absorb the center site, which is either to the
         #   * left when moving right
         #   * right when moving left
-        if info['center_at'] == 'right':
+        if info['center_at'] == 'left':
             return np.tensordot(self.c, AA, axes=1)
-        elif info['center_at'] == 'left':
+        elif info['center_at'] == 'right':
             return np.tensordot(AA, self.c, axes=1)
         else:
             ValueError(f'Invalid info["center_at"]: {info["center_at"]}')
@@ -275,7 +275,23 @@ class IDMRG:
     def rotate(self, A, site, side):
         """Rotates the optimized site
         """
-        return A, np.eye(A.shape[0 if side == 'left' else -1])
+        # No previous sites saved
+        if self._previous_sites is None:
+            return A, np.eye(A.shape[0 if side == 'left' else -1]), None
+
+        # The site will be canonicalized to the left while it is part of the
+        # right unit cell or vice versa.
+        if (side == 'left'):
+            return A, np.eye(A.shape[0 if side == 'left' else -1]), None
+        return A, np.eye(A.shape[0 if side == 'left' else -1]), None
+
+        #  print(site, side)
+        #  exit(0)
+        #  np.tensordot(A.conj(), A)
+        #  AAx = A.conj().reshape(-1, D).T @ Acomp.reshape(-1, D)
+        #  u2, s2, v2 = svd(AAx, full_matrices=False)
+        #  Q, uni1 = u2 @ v2, np.max(abs(s2 - 1))
+        #  u = u @ Q
 
     def update_sites(self, AA, two_site, info, D):
         """Recanonicalizes the updated sites and moves the center.
@@ -284,6 +300,7 @@ class IDMRG:
         site and the equivalent site in the previous unit cell.
         """
         sites = info['sites']
+        print_info = {}
         if two_site:
             assert len(sites) == 2
             newshape = (info['AAshape'][0] * info['AAshape'][1], -1)
@@ -295,8 +312,10 @@ class IDMRG:
             self.c = np.diag(s[:D] / norm(s[:D]))
 
             # fix the guage
-            self.sites[sites[0]], Q = self.rotate(A1, sites[0], 'right')
-            self.sites[sites[1]], P = self.rotate(A2, sites[1], 'left')
+            self.sites[sites[0]], Q, print_info['Qunity'] = \
+                self.rotate(A1, sites[0], 'right')
+            self.sites[sites[1]], P, print_info['Punity'] = \
+                self.rotate(A2, sites[1], 'left')
 
             self.sites[sites[0]] = self.sites[sites[0]].reshape(
                 info['AAshape'][0], info['AAshape'][1], -1
@@ -310,6 +329,7 @@ class IDMRG:
             self.center_bond = sites[1]
             self.LEnvironment[self.center_bond] = None
             self.REnvironment[self.center_bond] = None
+            print_info['trunc'] = s[D:] @ s[D:]
         else:
             assert len(sites) == 1
             if info['side'] == "right":
@@ -326,7 +346,8 @@ class IDMRG:
             A, self.c = polar(AA.reshape(newshape), side=info['side'])
 
             # fix the guage
-            self.sites[sites[0]], Q = self.rotate(A, sites[0], info['side'])
+            self.sites[sites[0]], Q, print_info['Qunity'] = \
+                self.rotate(A, sites[0], info['side'])
             self.sites[sites[0]] = \
                 self.sites[sites[0]].reshape(info['AAshape'])
 
@@ -340,6 +361,7 @@ class IDMRG:
                 self.REnvironment[self.center_bond] = None
             else:
                 ValueError(f'Invalid info["side"]: {info["side"]}')
+        return print_info
 
     def Heff(self, AA, two_site, info):
         AA = AA.reshape(info['AAshape'])
@@ -355,11 +377,10 @@ class IDMRG:
             )
         return result.ravel()
 
-    def optimizeUnitCells(self, D, two_site, which):
+    def optimizeUnitCells(self, D, two_site, which, verbosity):
         """Optimizes the two unit cells.
         """
         for info in self._sweep(two_site):
-            print(info)
             # Create the big site
             AA = self.make_center_site(two_site, info)
             H = LinearOperator(
@@ -367,10 +388,17 @@ class IDMRG:
             )
             w, v = eigsh(H, k=1, v0=AA.ravel(), which=which)
             self.current_E = w[0]
-            print(f'energy: {self.energy}')
-            self.update_sites(v[:, 0], two_site, info, D)
+            print_info = {
+                'sites': info['sites'],
+                'fidelity': 1 - abs(np.dot(AA.ravel().conj(), v[:, 0])),
+                'energy': self.energy
+            }
+            print_info = {**print_info,
+                          **self.update_sites(v[:, 0], two_site, info, D)}
+            if verbosity >= 3:
+                print(print_info)
 
 
 if __name__ == '__main__':
-    idmrg = IDMRG(NN_to_MPO(IsingInteraction()))
-    idmrg.kernel(two_site=True, max_iter=240, msweeps=1)
+    idmrg = IDMRG(NN_to_MPO(ogdmrg.HeisenbergInteraction()), cell_size=2)
+    idmrg.kernel(two_site=False, max_iter=2, msweeps=10, verbosity=3)
