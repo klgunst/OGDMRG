@@ -221,6 +221,7 @@ class IDMRG:
 
             info = {
                 'it': i,
+                'energy': self.energy,
                 'L_tf': 1 - abs(self.transfer_eig(self.Lcel, self.pLcel)),
                 'R_tf': 1 - abs(self.transfer_eig(self.Rcel, self.pRcel)),
                 'mixed_tf': 1 - abs(self.transfer_eig(self.Lcel, self.Rcel))
@@ -460,4 +461,4 @@ class IDMRG:
 
 if __name__ == '__main__':
     idmrg = IDMRG(NN_to_MPO(ogdmrg.HeisenbergInteraction()), cell_size=2)
-    idmrg.kernel(D=16, two_site=True, max_iter=200, msweeps=1, verbosity=3)
+    idmrg.kernel(D=16, two_site=True, max_iter=200, msweeps=1, verbosity=2)
