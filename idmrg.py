@@ -2,7 +2,7 @@ import numpy as np
 from numpy.random import rand
 from numpy.linalg import norm
 from scipy.linalg import polar, svd
-from scipy.sparse.linalg import eigsh, LinearOperator
+from scipy.sparse.linalg import eigsh, LinearOperator, eigs
 from numpy import einsum
 import ogdmrg
 
@@ -121,15 +121,33 @@ class IDMRG:
 
     @property
     def Lcel(self):
-        """The tensors of the left unit cell
+        """The tensors of the left unit cell.
         """
         return self.sites[:self.cell_size]
 
     @property
+    def pLcel(self):
+        """The tensors of the previous left unit cell.
+        """
+        try:
+            return self._previous_sites[:self.cell_size]
+        except TypeError:
+            return None
+
+    @property
     def Rcel(self):
-        """The tensors of the left unit cell
+        """The tensors of the right unit cell.
         """
         return self.sites[self.cell_size:]
+
+    @property
+    def pRcel(self):
+        """The tensors of the previous right unit cell.
+        """
+        try:
+            return self._previous_sites[self.cell_size:]
+        except TypeError:
+            return None
 
     @property
     def end_bond(self):
@@ -137,6 +155,27 @@ class IDMRG:
         updated.
         """
         return self.cell_size * 2
+
+    def transfer_eig(self, A_array, B_array):
+        """Calculates the largest eigenvalue of the mixed transfer matrix of
+        the cell A_array wit the cell B_array.
+        """
+        if A_array is None or B_array is None:
+            return 0
+
+        def transfer(A, B, x):
+            x = x.reshape(A.shape[0], B.shape[0])
+            x = np.tensordot(x, A, [[0], [0]])
+            return np.tensordot(x, B.conj(), [[0, 1], [0, 1]]).ravel()
+
+        def fullTF(x):
+            for A, B in zip(A_array, B_array):
+                x = transfer(A, B, x)
+            return x
+
+        LO = LinearOperator((A_array[0].shape[0] ** 2,) * 2, matvec=fullTF)
+        w, v = eigs(LO, k=1, which='LM')
+        return w[0]
 
     def kernel(self, D=16, two_site=False, max_iter=10, which='SA',
                msweeps=1, verbosity=1):
@@ -180,9 +219,17 @@ class IDMRG:
             for j in range(msweeps):
                 self.optimizeUnitCells(D, two_site, which, verbosity)
 
-            # Insert the two new unit cells
+            info = {
+                'it': i,
+                'L_tf': 1 - abs(self.transfer_eig(self.Lcel, self.pLcel)),
+                'R_tf': 1 - abs(self.transfer_eig(self.Rcel, self.pRcel)),
+                'mixed_tf': 1 - abs(self.transfer_eig(self.Lcel, self.Rcel))
+            }
+            if verbosity >= 2:
+                print(info)
+            if verbosity >= 3:
+                print("Inserting cells\n")
             self.newUnitCells()
-            print("Inserting cells\n")
 
         return self.energy
 
@@ -272,28 +319,38 @@ class IDMRG:
         else:
             ValueError(f'Invalid info["center_at"]: {info["center_at"]}')
 
-    def rotate(self, A, site, side):
+    def rotate(self, A, site, side, rotate):
         """Rotates the optimized site
         """
+        # rotate = False
+        if side != 'left' and side != 'right':
+            ValueError(f'Invalid side: {side}, choose "left" or "right".')
+
         # No previous sites saved
-        if self._previous_sites is None:
+        if self._previous_sites is None or not rotate:
             return A, np.eye(A.shape[0 if side == 'left' else -1]), None
 
         # The site will be canonicalized to the left while it is part of the
         # right unit cell or vice versa.
-        if (side == 'left'):
+        if (side == 'left') == (site < self.cell_size):
             return A, np.eye(A.shape[0 if side == 'left' else -1]), None
-        return A, np.eye(A.shape[0 if side == 'left' else -1]), None
 
-        #  print(site, side)
-        #  exit(0)
-        #  np.tensordot(A.conj(), A)
-        #  AAx = A.conj().reshape(-1, D).T @ Acomp.reshape(-1, D)
-        #  u2, s2, v2 = svd(AAx, full_matrices=False)
-        #  Q, uni1 = u2 @ v2, np.max(abs(s2 - 1))
-        #  u = u @ Q
+        pA = self._previous_sites[site]
+        if side == 'left':
+            AA = np.tensordot(pA.conj(), A, [[1, 2], [1, 2]])
+        else:
+            AA = np.tensordot(A, pA.conj(), [[0, 1], [0, 1]])
+        u, s, v = svd(AA, full_matrices=False)
 
-    def update_sites(self, AA, two_site, info, D):
+        Q, uni = u @ v, np.max(abs(s - 1))
+        if side == 'left':
+            A = np.tensordot(Q, A, [[1], [0]])
+        else:
+            A = np.tensordot(A, Q, [[2], [0]])
+
+        return A, Q, uni
+
+    def update_sites(self, AA, two_site, info, D, rotate=True):
         """Recanonicalizes the updated sites and moves the center.
 
         Canonicalization is done by minimizing the difference between this
@@ -313,9 +370,10 @@ class IDMRG:
 
             # fix the guage
             self.sites[sites[0]], Q, print_info['Qunity'] = \
-                self.rotate(A1, sites[0], 'right')
+                self.rotate(A1, sites[0], 'right', rotate)
+
             self.sites[sites[1]], P, print_info['Punity'] = \
-                self.rotate(A2, sites[1], 'left')
+                self.rotate(A2, sites[1], 'left', rotate)
 
             self.sites[sites[0]] = self.sites[sites[0]].reshape(
                 info['AAshape'][0], info['AAshape'][1], -1
@@ -347,7 +405,8 @@ class IDMRG:
 
             # fix the guage
             self.sites[sites[0]], Q, print_info['Qunity'] = \
-                self.rotate(A, sites[0], info['side'])
+                self.rotate(A, sites[0], info['side'], rotate)
+
             self.sites[sites[0]] = \
                 self.sites[sites[0]].reshape(info['AAshape'])
 
@@ -374,7 +433,7 @@ class IDMRG:
             result = np.tensordot(result, self.MPO, axes=[[1, 3], [1, 0]])
         result = np.tensordot(
             result, self.REnvironment[rbond], axes=[[1, 2 + two_site], [2, 1]]
-            )
+        )
         return result.ravel()
 
     def optimizeUnitCells(self, D, two_site, which, verbosity):
@@ -401,4 +460,4 @@ class IDMRG:
 
 if __name__ == '__main__':
     idmrg = IDMRG(NN_to_MPO(ogdmrg.HeisenbergInteraction()), cell_size=2)
-    idmrg.kernel(two_site=False, max_iter=2, msweeps=10, verbosity=3)
+    idmrg.kernel(D=16, two_site=True, max_iter=200, msweeps=1, verbosity=3)
