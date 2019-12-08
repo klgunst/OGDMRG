@@ -1,4 +1,5 @@
 import numpy as np
+from time import sleep
 from numpy.random import rand
 from numpy.linalg import norm
 from scipy.linalg import polar, svd
@@ -178,7 +179,7 @@ class IDMRG:
         return w[0]
 
     def kernel(self, D=16, two_site=False, max_iter=10, which='SA',
-               msweeps=1, verbosity=1):
+               msweeps=1, verbosity=1, rotate=True):
         """Optimize the iDMRG.
 
         Args:
@@ -217,11 +218,12 @@ class IDMRG:
         for i in range(max_iter):
             # Update the current unit cells
             for j in range(msweeps):
-                self.optimizeUnitCells(D, two_site, which, verbosity)
+                self.optimizeUnitCells(D, two_site, which, verbosity, rotate)
 
             info = {
                 'it': i,
-                'energy': self.energy,
+                'energy': (np.log(self.current_E) - np.log(self.previous_E)) /
+                (self.cell_size * 2),
                 'L_tf': 1 - abs(self.transfer_eig(self.Lcel, self.pLcel)),
                 'R_tf': 1 - abs(self.transfer_eig(self.Rcel, self.pRcel)),
                 'mixed_tf': 1 - abs(self.transfer_eig(self.Lcel, self.Rcel))
@@ -323,7 +325,6 @@ class IDMRG:
     def rotate(self, A, site, side, rotate):
         """Rotates the optimized site
         """
-        # rotate = False
         if side != 'left' and side != 'right':
             ValueError(f'Invalid side: {side}, choose "left" or "right".')
 
@@ -376,12 +377,6 @@ class IDMRG:
             self.sites[sites[1]], P, print_info['Punity'] = \
                 self.rotate(A2, sites[1], 'left', rotate)
 
-            self.sites[sites[0]] = self.sites[sites[0]].reshape(
-                info['AAshape'][0], info['AAshape'][1], -1
-            )
-            self.sites[sites[1]] = self.sites[sites[1]].reshape(
-                -1, info['AAshape'][-2], info['AAshape'][-1]
-            )
             self.c = Q.conj().T @ self.c @ P.conj().T
 
             # Setting new center bond
@@ -401,15 +396,13 @@ class IDMRG:
             if info['side'] == 'left':
                 newshape = (info['AAshape'][0],  -1)
             else:
-                newshape = (info['AAshape'][0] * info['AAshape'][1], -1)
+                newshape = (-1, info['AAshape'][-1])
             A, self.c = polar(AA.reshape(newshape), side=info['side'])
+            A = A.reshape(info['AAshape'])
 
             # fix the guage
             self.sites[sites[0]], Q, print_info['Qunity'] = \
                 self.rotate(A, sites[0], info['side'], rotate)
-
-            self.sites[sites[0]] = \
-                self.sites[sites[0]].reshape(info['AAshape'])
 
             if info['side'] == "right":
                 self.c = Q.conj().T @ self.c
@@ -437,7 +430,7 @@ class IDMRG:
         )
         return result.ravel()
 
-    def optimizeUnitCells(self, D, two_site, which, verbosity):
+    def optimizeUnitCells(self, D, two_site, which, verbosity, rotate):
         """Optimizes the two unit cells.
         """
         for info in self._sweep(two_site):
@@ -454,11 +447,23 @@ class IDMRG:
                 'energy': self.energy
             }
             print_info = {**print_info,
-                          **self.update_sites(v[:, 0], two_site, info, D)}
+                          **self.update_sites(v[:, 0], two_site, info, D,
+                                              rotate)}
             if verbosity >= 3:
                 print(print_info)
 
 
 if __name__ == '__main__':
     idmrg = IDMRG(NN_to_MPO(ogdmrg.HeisenbergInteraction()), cell_size=2)
-    idmrg.kernel(D=16, two_site=True, max_iter=200, msweeps=1, verbosity=2)
+    # idmrg.kernel(D=16, two_site=True, max_iter=200, msweeps=1, verbosity=3,
+                 # rotate=False)
+
+    # sleep(3)
+    # idmrg.kernel(D=16, two_site=True, max_iter=200, msweeps=1, verbosity=3,
+                 # rotate=True)
+    # sleep(3)
+
+    idmrg.kernel(D=16, two_site=True, max_iter=1000, msweeps=5, verbosity=3,
+                 rotate=False)
+    idmrg.kernel(D=16, two_site=True, max_iter=100, msweeps=1, verbosity=3,
+                 rotate=True)
