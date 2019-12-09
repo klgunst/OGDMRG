@@ -85,19 +85,29 @@ class IDMRG:
         center_bond: The current central bond in the two unit cells.
         sites: The MPS's for the current two central unit cells.
         c: The center tensor.
+        kind: Type of MPO inputted. Either 'h' for a Hamiltonian or 'pf' for a
+        partition function.
     """
 
-    def __init__(self, MPO, cell_size=1):
+    def __init__(self, MPO, kind='h', cell_size=1):
         """Initializer for the IDMRG class.
 
         Environments will be set to zero and the initial tensors are randomly
         initialized.
 
         Attributes:
-            MPO: The MPO for the problem
+            MPO: The MPO for the problem.
+            kind: Type of MPO inputted. Either 'h' for a Hamiltonian or 'pf'
+            for a partition function.
             cell_size: The size of one unit cell.
         """
+        if kind != 'h' and kind != 'pf':
+            raise ValueError(
+                f'Wrong kind inputted ({kind}), should be either "h" or "pf".'
+            )
+
         self.cell_size = cell_size
+        self.kind = kind
 
         self.MPO = MPO
         self.MPOdim = MPO.shape[0]
@@ -116,8 +126,16 @@ class IDMRG:
     @property
     def energy(self):
         """Energy per unit cell
+
+        For `self.kind == 'h'` it is the energy.
+        For `self.kind == 'pf'` it is -β * (Helmholtz free energy).
         """
-        return (self.current_E - self.previous_E) / 2 / self.cell_size
+        if self.kind == 'h':
+            return self.current_E / (2 * self.cell_size)
+        elif self.kind == 'pf':
+            return np.log(self.current_E) / (2 * self.cell_size)
+        else:
+            raise ValueError("invalid `self.kind`")
 
     @property
     def Lcel(self):
@@ -195,7 +213,9 @@ class IDMRG:
         """
         if self.sites is None:
             self.sites = [
-                polar(rand(D * self.pdim, D))[0].reshape(D, self.pdim, D)
+                polar(
+                    rand(D * self.pdim, D) + rand(D * self.pdim, D) * 1j
+                )[0].reshape(D, self.pdim, D)
                 for i in range(self.cell_size)
             ] + [
                 polar(rand(D, self.pdim * D))[0].reshape(D, self.pdim, D)
@@ -225,7 +245,7 @@ class IDMRG:
 
             info = {
                 'it': i,
-                'energy': np.log(self.current_E) / (self.cell_size * 2),
+                'energy': self.energy,
                 'L_tf': 1 - abs(self.transfer_eig(self.Lcel, self.pLcel)),
                 'R_tf': 1 - abs(self.transfer_eig(self.Rcel, self.pRcel)),
                 'mixed_tf': 1 - abs(self.transfer_eig(self.Lcel, self.Rcel))
@@ -249,10 +269,20 @@ class IDMRG:
         #   Deleting the other environments.
         assert self.center_bond == self.cell_size
         self.previous_E = self.current_E
-        scale = 1. / np.sqrt(self.current_E)
-        self.LEnvironment[0] = scale * self.LEnvironment[self.center_bond]
-        self.REnvironment[self.end_bond] = scale * \
-            self.REnvironment[self.center_bond]
+        if self.kind == 'h':
+            shift = self.current_E / 2
+            # shift = 0
+            D = self.LEnvironment[0].shape[0]
+            self.LEnvironment[0] = self.LEnvironment[self.center_bond]
+            self.LEnvironment[0][:, -1, :] -= np.eye(D) * shift
+            self.REnvironment[self.end_bond] = \
+                self.REnvironment[self.center_bond]
+            self.REnvironment[self.end_bond][:, 0, :] -= np.eye(D) * shift
+        elif self.kind == 'pf':
+            scale = 1. / np.sqrt(self.current_E)
+            self.LEnvironment[0] = scale * self.LEnvironment[self.center_bond]
+            self.REnvironment[self.end_bond] = scale * \
+                self.REnvironment[self.center_bond]
 
         # Pushing left and right cells to the previous ones
         self._previous_sites = tuple([s.copy() for s in self.sites])
@@ -261,7 +291,7 @@ class IDMRG:
         if self.LEnvironment[0].shape[0] != self.sites[0].shape[0]:
             orig = self.sites[0]
             newD = self.LEnvironment[0].shape[0]
-            padded = np.zeros((newD, *orig.shape[1:]))
+            padded = np.zeros((newD, *orig.shape[1:]), dtype=complex)
             padded[:orig.shape[0], :, :] = orig
             self.sites[0] = padded
 
@@ -269,7 +299,7 @@ class IDMRG:
                 self.sites[-1].shape[-1]:
             orig = self.sites[-1]
             newD = self.REnvironment[self.end_bond].shape[0]
-            padded = np.zeros((*orig.shape[:-1], newD))
+            padded = np.zeros((*orig.shape[:-1], newD), dtype=complex)
             padded[:, :, :orig.shape[-1]] = orig
             self.sites[-1] = padded
 
@@ -359,9 +389,9 @@ class IDMRG:
 
         pA = self._previous_sites[site]
         if side == 'left':
-            AA = np.tensordot(pA.conj(), A, [[1, 2], [1, 2]])
+            AA = np.tensordot(pA, A.conj(), [[1, 2], [1, 2]])
         else:
-            AA = np.tensordot(A, pA.conj(), [[0, 1], [0, 1]])
+            AA = np.tensordot(A.conj(), pA, [[0, 1], [0, 1]])
         u, s, v = svd(AA, full_matrices=False)
 
         Q, uni = u @ v, np.max(abs(s - 1))
@@ -384,6 +414,7 @@ class IDMRG:
             assert len(sites) == 2
             newshape = (info['AAshape'][0] * info['AAshape'][1], -1)
             u, s, v = svd(AA.reshape(newshape))
+            D = min(len(s), D)
 
             # Fill in left and right site and center site
             A1 = u[:, :D].reshape(-1, self.pdim, D)
@@ -455,14 +486,15 @@ class IDMRG:
             # Create the big site
             AA = self.make_center_site(two_site, info)
             H = LinearOperator(
-                (AA.size,) * 2, matvec=lambda x: self.Heff(x, two_site, info)
+                (AA.size,) * 2, matvec=lambda x: self.Heff(x, two_site, info),
+                dtype=complex
             )
             w, v = eigsh(H, k=1, v0=AA.ravel(), which=which)
             self.current_E = w[0]
             print_info = {
                 'sites': info['sites'],
                 'fidelity': 1 - abs(np.dot(AA.ravel().conj(), v[:, 0])),
-                'energy': np.log(self.current_E) / (self.cell_size * 2),
+                'energy': self.energy,
             }
             print_info = {**print_info,
                           **self.update_sites(v[:, 0], two_site, info, D,
@@ -473,5 +505,5 @@ class IDMRG:
 
 if __name__ == '__main__':
     idmrg = IDMRG(NN_to_MPO(ogdmrg.HeisenbergInteraction()), cell_size=2)
-    idmrg.kernel(D=16, two_site=False, max_iter=20, msweeps=1, verbosity=3,
-                 rotate=False)
+    idmrg.kernel(D=16, two_site=True, max_iter=1000, msweeps=3, verbosity=2,
+                 rotate=True)
