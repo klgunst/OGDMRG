@@ -275,9 +275,8 @@ class IDMRG:
         self.previous_E = self.current_E
         if self.kind == 'h':
             shift = self.current_E / 2
-            # shift = 0
-            D = self.LEnvironment[0].shape[0]
             self.LEnvironment[0] = self.LEnvironment[self.center_bond]
+            D = self.LEnvironment[0].shape[0]
             self.LEnvironment[0][:, -1, :] -= np.eye(D) * shift
             self.REnvironment[self.end_bond] = \
                 self.REnvironment[self.center_bond]
@@ -392,6 +391,11 @@ class IDMRG:
             return A, np.eye(A.shape[0 if side == 'left' else -1]), None
 
         pA = self._previous_sites[site]
+
+        # Different shape
+        if pA.shape != A.shape:
+            return A, np.eye(A.shape[0 if side == 'left' else -1]), None
+
         if side == 'left':
             AA = np.tensordot(pA, A.conj(), [[1, 2], [1, 2]])
         else:
