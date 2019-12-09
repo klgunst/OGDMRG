@@ -2,7 +2,7 @@ import numpy as np
 from numpy.random import rand
 from numpy.linalg import norm
 from scipy.linalg import polar, svd
-from scipy.sparse.linalg import eigsh, LinearOperator, eigs
+from scipy.sparse.linalg import LinearOperator, eigs
 import ogdmrg
 
 import unittest
@@ -12,6 +12,9 @@ from pyscf.lib import davidson
 
 
 def NN_to_MPO(NN, tol=1e-12):
+    """Transforms a neares neighbour interaction term (bra1, bra2, ket1, ket2)
+    to its corresponding MPO (MPO1, ket1, MPO2, bra1).
+    """
     NN = NN.transpose([0, 2, 1, 3])
     pdim = NN.shape[0]
     u, s, v = svd(NN.reshape(pdim * pdim, pdim * pdim))
@@ -25,17 +28,22 @@ def NN_to_MPO(NN, tol=1e-12):
     MPO[-1, :, -1, :] = np.eye(pdim)
     MPO[0, :, 1:-1, :] = u.transpose([1, 2, 0])
     MPO[1:-1, :, -1, :] = v.transpose([0, 2, 1])
-
     return MPO
 
 
 class Environment:
-    """For the environments of DMRG.
+    """For the environments of DMRG. This object is indexeable.
+
+    It automatically updates if needed.
+
+    Attributes:
+        maxlen: The maximal amount of environments stored.
+        reverse: True if right environment else False.
     """
     def __init__(self, idmrg, reverse=False):
         """
         Attributes:
-            idmrg: The IDMRG instance
+            idmrg: The IDMRG instance.
             reverse: True if it is a right environment else, false.
         """
         self._idmrg = idmrg
@@ -45,6 +53,9 @@ class Environment:
 
     def __setitem__(self, index, value):
         self._envs[index] = value
+
+        # Set also all next environments which were dependent of the previous
+        # one to None
         if self.reverse:
             for i in range(index):
                 self._envs[i] = None
@@ -57,6 +68,7 @@ class Environment:
             return self._envs[index]
         else:
             # Environment not calculated yet, we will have to form it ourselves
+
             # The previous environment
             pbond_index = index + (1 if self.reverse else -1)
             site_index = index + (0 if self.reverse else -1)
@@ -87,7 +99,7 @@ class IDMRG:
     """General unit cel iDMRG.
 
     Attributes:
-        cell_size: The size of the unit cell
+        cell_size: The size of the unit cell.
         center_bond: The current central bond in the two unit cells.
         sites: The MPS's for the current two central unit cells.
         c: The center tensor.
@@ -124,7 +136,6 @@ class IDMRG:
         # We don't initialize the sites
         self.sites, self.center_bond = None, None
         self._previous_sites = None
-        self.previous_E = 0
 
         self.LEnvironment = Environment(self, reverse=False)
         self.REnvironment = Environment(self, reverse=True)
@@ -137,11 +148,18 @@ class IDMRG:
         For `self.kind == 'pf'` it is -β * (Helmholtz free energy).
         """
         if self.kind == 'h':
-            return self.current_E / (2 * self.cell_size)
+            return self.eigenval / (2 * self.cell_size)
         elif self.kind == 'pf':
-            return np.log(self.current_E) / (2 * self.cell_size)
+            return np.log(self.eigenval) / (2 * self.cell_size)
         else:
             raise ValueError("invalid `self.kind`")
+
+    @property
+    def sign(self):
+        """Quick and dirty fix such that I can use 'SA' for eigsh for 'LA'
+        also.
+        """
+        return -1 if self.kind == 'pf' else 1
 
     @property
     def Lcel(self):
@@ -205,6 +223,34 @@ class IDMRG:
         w, v = eigs(LO, k=1, which='LM')
         return w[0]
 
+    def random_init(self, D):
+        """Random initialization of the MPS and initializiation of the
+        environments.
+        """
+        Lcanon = [polar(rand(D * self.pdim, D) + rand(D * self.pdim, D) * 1j
+                        )[0].reshape(D, self.pdim, D)
+                  for i in range(self.cell_size)]
+        Rcanon = [polar(rand(D, self.pdim * D) + rand(D, self.pdim * D) * 1j
+                        )[0].reshape(D, self.pdim, D)
+                  for i in range(self.cell_size)]
+
+        self.sites = Lcanon + Rcanon
+        self.c = rand(D, D) + rand(D, D) * 1j
+        self.c = self.c / norm(self.c)
+        self.center_bond = self.cell_size
+
+        # Begin of environment
+        LE = np.zeros((D, self.MPOdim, D))
+        LE[:, 0, :] = 1.
+        LE = LE / norm(LE)
+        self.LEnvironment[0] = LE
+
+        # End of environment
+        RE = np.zeros((D, self.MPOdim, D))
+        RE[:, -1, :] = 1.
+        RE = RE / norm(RE)
+        self.REnvironment[self.end_bond] = RE
+
     def kernel(self, D=16, two_site=False, max_iter=10, msweeps=1, verbosity=1,
                rotate=True):
         """Optimize the iDMRG.
@@ -214,35 +260,17 @@ class IDMRG:
             two_site: True if you wan't do to two-site update, False if you
             want to do one-site update.
             max_iter: Maximal number of unitcells to optimize in this update.
+            verbosity:
+                0: Don't print anything
+                1: Print Every macro iteration
+                2: Print Every micro iteration
         """
         if self.sites is None:
-            self.sites = [
-                polar(
-                    rand(D * self.pdim, D) + rand(D * self.pdim, D) * 1j
-                )[0].reshape(D, self.pdim, D)
-                for i in range(self.cell_size)
-            ] + [
-                polar(rand(D, self.pdim * D))[0].reshape(D, self.pdim, D)
-                for i in range(self.cell_size)
-            ]
-            self.c = rand(D, D)
-            self.c = self.c / norm(self.c)
-            self.center_bond = self.cell_size
-
-            # Begin of environment
-            LE = np.zeros((D, self.MPOdim, D))
-            LE[:, 0, :] = 1.
-            LE = LE / norm(LE)
-            self.LEnvironment[0] = LE
-
-            # End of environment
-            RE = np.zeros((D, self.MPOdim, D))
-            RE[:, -1, :] = 1.
-            RE = RE / norm(RE)
-            self.REnvironment[self.end_bond] = RE
+            self.random_init(D)
 
         # Two new unit cells are inserted per iteration
         for i in range(max_iter):
+
             # Update the current unit cells
             for j in range(msweeps):
                 self.optimizeUnitCells(D, two_site, verbosity, rotate)
@@ -254,12 +282,9 @@ class IDMRG:
                 'R_tf': 1 - abs(self.transfer_eig(self.Rcel, self.pRcel)),
                 'mixed_tf': 1 - abs(self.transfer_eig(self.Lcel, self.Rcel))
             }
-            if verbosity >= 2:
+            if verbosity >= 1:
                 print(info)
-            if verbosity >= 3:
-                print("Inserting cells\n")
             self.newUnitCells()
-
         return self.energy
 
     def newUnitCells(self):
@@ -271,10 +296,10 @@ class IDMRG:
         #   Setting the left environment in the middle to base left.
         #   Setting the right environment in the middle to base right.
         #   Deleting the other environments.
+        #   Adding appropriate shifts or rescaling
         assert self.center_bond == self.cell_size
-        self.previous_E = self.current_E
         if self.kind == 'h':
-            shift = self.current_E / 2
+            shift = self.eigenval / 2
             self.LEnvironment[0] = self.LEnvironment[self.center_bond]
             D = self.LEnvironment[0].shape[0]
             self.LEnvironment[0][:, -1, :] -= np.eye(D) * shift
@@ -282,7 +307,7 @@ class IDMRG:
                 self.REnvironment[self.center_bond]
             self.REnvironment[self.end_bond][:, 0, :] -= np.eye(D) * shift
         elif self.kind == 'pf':
-            scale = 1. / np.sqrt(self.current_E)
+            scale = 1. / np.sqrt(self.eigenval)
             self.LEnvironment[0] = scale * self.LEnvironment[self.center_bond]
             self.REnvironment[self.end_bond] = scale * \
                 self.REnvironment[self.center_bond]
@@ -290,7 +315,7 @@ class IDMRG:
         # Pushing left and right cells to the previous ones
         self._previous_sites = tuple([s.copy() for s in self.sites])
 
-        # I need to pad with zeros
+        # Padding with zeros
         if self.LEnvironment[0].shape[0] != self.sites[0].shape[0]:
             orig = self.sites[0]
             newD = self.LEnvironment[0].shape[0]
@@ -376,7 +401,7 @@ class IDMRG:
             ValueError(f'Invalid info["center_at"]: {info["center_at"]}')
 
     def rotate(self, A, site, side, rotate):
-        """Rotates the optimized site
+        """Rotates the optimized site.
         """
         if side != 'left' and side != 'right':
             ValueError(f'Invalid side: {side}, choose "left" or "right".')
@@ -386,13 +411,13 @@ class IDMRG:
             return A, np.eye(A.shape[0 if side == 'left' else -1]), None
 
         # The site will be canonicalized to the left while it is part of the
-        # right unit cell or vice versa.
+        # right unit cell or vice versa. So no rotation needed
         if (side == 'left') == (site < self.cell_size):
             return A, np.eye(A.shape[0 if side == 'left' else -1]), None
 
         pA = self._previous_sites[site]
 
-        # Different shape
+        # Different shape with previous tensor.
         if pA.shape != A.shape:
             return A, np.eye(A.shape[0 if side == 'left' else -1]), None
 
@@ -476,7 +501,7 @@ class IDMRG:
         return print_info
 
     def Heff(self, AA, two_site, info):
-        """Executes a matvec
+        """Executes a matvec.
         """
         AA = AA.reshape(info['AAshape'])
         LE = self.LEnvironment[info['sites'][0]]
@@ -487,7 +512,7 @@ class IDMRG:
         if two_site:
             result = np.tensordot(result, self.MPO, axes=[[1, 3], [1, 0]])
         result = np.tensordot(result, RE, axes=[[1, 2 + two_site], [2, 1]])
-        return result.ravel()
+        return self.sign * result.ravel()
 
     def heff_diagonal(self, two_site, info):
         """diagonal of the matvec
@@ -502,7 +527,8 @@ class IDMRG:
         diag = np.tensordot(LE_diag, MPO_diag, axes=[[0], [0]])
         if two_site:
             diag = np.tensordot(diag, MPO_diag, axes=[[1], [0]])
-        return np.tensordot(diag, RE_diag, axes=[[1 + two_site], [0]]).ravel()
+        return self.sign * \
+            np.tensordot(diag, RE_diag, axes=[[1 + two_site], [0]]).ravel()
 
     def optimizeUnitCells(self, D, two_site, verbosity, rotate):
         """Optimizes the two unit cells.
@@ -510,21 +536,12 @@ class IDMRG:
         for info in self._sweep(two_site):
             # Create the big site
             AA = self.make_center_site(two_site, info)
-            H = LinearOperator(
-                (AA.size,) * 2, matvec=lambda x: self.Heff(x, two_site, info),
-                dtype=complex
-            )
-            which = {'h': 'SA', 'pf': 'LM'}
             diagonal = self.heff_diagonal(two_site, info)
 
-            if which[self.kind] == 'SA':
-                w, v = davidson(lambda x: self.Heff(x, two_site, info),
-                                x0=AA.ravel(), precond=diagonal)
-            else:
-                w, v = eigsh(H, k=1, v0=AA.ravel(), which=which[self.kind])
-                w, v = w[0], v[:, 0]
+            w, v = davidson(lambda x: self.Heff(x, two_site, info),
+                            x0=AA.ravel(), precond=diagonal)
+            self.eigenval = w * self.sign
 
-            self.current_E = w
             print_info = {
                 'sites': info['sites'],
                 'fidelity': 1 - abs(np.dot(AA.ravel().conj(), v)),
@@ -532,8 +549,10 @@ class IDMRG:
             }
             print_info = {**print_info,
                           **self.update_sites(v, two_site, info, D, rotate)}
-            if verbosity >= 3:
+            if verbosity >= 2:
                 print(print_info)
+        if verbosity >= 2:
+            print()
 
 
 class TestDMRG(unittest.TestCase):
