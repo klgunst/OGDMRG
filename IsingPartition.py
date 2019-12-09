@@ -1,5 +1,6 @@
 from idmrg import IDMRG
 import numpy as np
+import pickle
 
 
 def IsingMPO(β=0.5 * np.log(1 + np.sqrt(2))):
@@ -16,10 +17,11 @@ def IsingMPO(β=0.5 * np.log(1 + np.sqrt(2))):
     return np.einsum('ijkl,ia,jb,kc,ld->abcd', MPO, *(sq_mat,) * 4)
 
 
-# reference ≅ 0.9296950200766443  # Wolfram
-# reference = np.log(2) / 2 + (2 + 33193 / 50000) / (2 * np.pi)  # Wolfram
+reference = 0.9296953983416103  # Wolfram
 
 idmrg = IDMRG(IsingMPO(), kind='pf', cell_size=1)
-idmrg.kernel(D=4, two_site=True, max_iter=500, msweeps=1, verbosity=2)
-idmrg.kernel(D=50, two_site=True, max_iter=10000, msweeps=1, verbosity=2)
-# idmrg.kernel(D=50, two_site=False, max_iter=4000, msweeps=3, verbosity=2)
+for D in [4, 8, 12, 16, 24, 50, 100]:
+    E = idmrg.kernel(D, max_iter=5000, verbosity=2)
+    print(f"D: {E}, {E - reference}")
+    pickle.dump(idmrg, open("ising.pkl", "wb"),
+                protocol=pickle.HIGHEST_PROTOCOL)
