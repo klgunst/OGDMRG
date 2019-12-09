@@ -16,18 +16,10 @@ def IsingMPO(β=0.5 * np.log(1 + np.sqrt(2))):
     return np.einsum('ijkl,ia,jb,kc,ld->abcd', MPO, *(sq_mat,) * 4)
 
 
-idmrg = IDMRG(IsingMPO(), cell_size=1)
-idmrg.kernel(D=5, two_site=False, max_iter=1000, which='LM', msweeps=1,
+idmrg = IDMRG(IsingMPO(), kind='pf', cell_size=1)
+idmrg.kernel(D=4, two_site=False, max_iter=4000, which='LM', msweeps=3,
              verbosity=2, rotate=False)
-idmrg.kernel(D=10, two_site=True, max_iter=100, which='LM', msweeps=1,
+idmrg.kernel(D=24, two_site=True, max_iter=100, which='LM', msweeps=1,
              verbosity=2, rotate=False)
-idmrg.kernel(D=10, two_site=False, max_iter=1000, which='LM', msweeps=1,
-             verbosity=2, rotate=False)
-idmrg.kernel(D=20, two_site=True, max_iter=100, which='LM', msweeps=1,
-             verbosity=2, rotate=False)
-idmrg.kernel(D=20, two_site=False, max_iter=1000, which='LM', msweeps=1,
-             verbosity=2, rotate=False)
-idmrg.kernel(D=35, two_site=True, max_iter=100, which='LM', msweeps=1,
-             verbosity=2, rotate=False)
-idmrg.kernel(D=35, two_site=False, max_iter=1000, which='LM', msweeps=1,
+idmrg.kernel(D=24, two_site=False, max_iter=4000, which='LM', msweeps=3,
              verbosity=2, rotate=False)

@@ -3,7 +3,6 @@ from numpy.random import rand
 from numpy.linalg import norm
 from scipy.linalg import polar, svd
 from scipy.sparse.linalg import eigsh, LinearOperator, eigs
-from numpy import einsum
 import ogdmrg
 
 
@@ -68,12 +67,14 @@ class Environment:
                 )
 
             if self.reverse:
-                contract = 'anb,dib,cja,minj->cmd'
+                env = np.tensordot(A.conj(), penv, [[2], [0]])
+                env = np.tensordot(env, self._idmrg.MPO, [[1, 2], [3, 2]])
+                self._envs[index] = np.tensordot(env, A, [[1, 3], [2, 1]])
             else:
-                contract = 'amb,bid,ajc,minj->cnd'
+                env = np.tensordot(A.conj(), penv, [[0], [0]])
+                env = np.tensordot(env, self._idmrg.MPO, [[0, 2], [3, 0]])
+                self._envs[index] = np.tensordot(env, A, [[1, 2], [0, 1]])
 
-            self._envs[index] = einsum(contract, penv, A, A.conj(),
-                                       self._idmrg.MPO)
             return self._envs[index]
 
 
@@ -505,5 +506,5 @@ class IDMRG:
 
 if __name__ == '__main__':
     idmrg = IDMRG(NN_to_MPO(ogdmrg.HeisenbergInteraction()), cell_size=2)
-    idmrg.kernel(D=16, two_site=True, max_iter=1000, msweeps=3, verbosity=2,
+    idmrg.kernel(D=16, two_site=False, max_iter=100, msweeps=3, verbosity=2,
                  rotate=True)
