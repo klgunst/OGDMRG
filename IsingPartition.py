@@ -16,6 +16,9 @@ def IsingMPO(β=0.5 * np.log(1 + np.sqrt(2))):
     return np.einsum('ijkl,ia,jb,kc,ld->abcd', MPO, *(sq_mat,) * 4)
 
 
+# reference ≅ 0.9296950200766443  # Wolfram
+# reference = np.log(2) / 2 + (2 + 33193 / 50000) / (2 * np.pi)  # Wolfram
+
 idmrg = IDMRG(IsingMPO(), kind='pf', cell_size=1)
 idmrg.kernel(D=4, two_site=False, max_iter=4000, msweeps=3, verbosity=2)
 idmrg.kernel(D=24, two_site=True, max_iter=100, msweeps=1, verbosity=2)
