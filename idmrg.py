@@ -1,5 +1,4 @@
 import numpy as np
-from time import sleep
 from numpy.random import rand
 from numpy.linalg import norm
 from scipy.linalg import polar, svd
@@ -164,6 +163,10 @@ class IDMRG:
         if A_array is None or B_array is None:
             return 0
 
+        # A_array and B_array have tensors of different shape
+        if any([A.shape != B.shape for A, B in zip(A_array, B_array)]):
+            return 0
+
         def transfer(A, B, x):
             x = x.reshape(A.shape[0], B.shape[0])
             x = np.tensordot(x, A, [[0], [0]])
@@ -222,8 +225,7 @@ class IDMRG:
 
             info = {
                 'it': i,
-                'energy': (np.log(self.current_E) - np.log(self.previous_E)) /
-                (self.cell_size * 2),
+                'energy': np.log(self.current_E) / (self.cell_size * 2),
                 'L_tf': 1 - abs(self.transfer_eig(self.Lcel, self.pLcel)),
                 'R_tf': 1 - abs(self.transfer_eig(self.Rcel, self.pRcel)),
                 'mixed_tf': 1 - abs(self.transfer_eig(self.Lcel, self.Rcel))
@@ -247,11 +249,29 @@ class IDMRG:
         #   Deleting the other environments.
         assert self.center_bond == self.cell_size
         self.previous_E = self.current_E
-        self.LEnvironment[0] = self.LEnvironment[self.center_bond]
-        self.REnvironment[self.end_bond] = self.REnvironment[self.center_bond]
+        scale = 1. / np.sqrt(self.current_E)
+        self.LEnvironment[0] = scale * self.LEnvironment[self.center_bond]
+        self.REnvironment[self.end_bond] = scale * \
+            self.REnvironment[self.center_bond]
 
         # Pushing left and right cells to the previous ones
         self._previous_sites = tuple([s.copy() for s in self.sites])
+
+        # I need to pad with zeros
+        if self.LEnvironment[0].shape[0] != self.sites[0].shape[0]:
+            orig = self.sites[0]
+            newD = self.LEnvironment[0].shape[0]
+            padded = np.zeros((newD, *orig.shape[1:]))
+            padded[:orig.shape[0], :, :] = orig
+            self.sites[0] = padded
+
+        if self.REnvironment[self.end_bond].shape[0] != \
+                self.sites[-1].shape[-1]:
+            orig = self.sites[-1]
+            newD = self.REnvironment[self.end_bond].shape[0]
+            padded = np.zeros((*orig.shape[:-1], newD))
+            padded[:, :, :orig.shape[-1]] = orig
+            self.sites[-1] = padded
 
     def _sweep(self, two_site):
         """Sweeps through the bonds of the two central unit cells starting from
@@ -418,16 +438,14 @@ class IDMRG:
 
     def Heff(self, AA, two_site, info):
         AA = AA.reshape(info['AAshape'])
-        lbond = info['sites'][0]
-        rbond = info['sites'][-1] + 1
+        LE = self.LEnvironment[info['sites'][0]]
+        RE = self.REnvironment[info['sites'][-1] + 1]
 
-        result = np.tensordot(self.LEnvironment[lbond], AA, axes=1)
+        result = np.tensordot(LE, AA, axes=1)
         result = np.tensordot(result, self.MPO, axes=[[1, 2], [0, 1]])
         if two_site:
             result = np.tensordot(result, self.MPO, axes=[[1, 3], [1, 0]])
-        result = np.tensordot(
-            result, self.REnvironment[rbond], axes=[[1, 2 + two_site], [2, 1]]
-        )
+        result = np.tensordot(result, RE, axes=[[1, 2 + two_site], [2, 1]])
         return result.ravel()
 
     def optimizeUnitCells(self, D, two_site, which, verbosity, rotate):
@@ -444,7 +462,7 @@ class IDMRG:
             print_info = {
                 'sites': info['sites'],
                 'fidelity': 1 - abs(np.dot(AA.ravel().conj(), v[:, 0])),
-                'energy': self.energy
+                'energy': np.log(self.current_E) / (self.cell_size * 2),
             }
             print_info = {**print_info,
                           **self.update_sites(v[:, 0], two_site, info, D,
@@ -455,15 +473,5 @@ class IDMRG:
 
 if __name__ == '__main__':
     idmrg = IDMRG(NN_to_MPO(ogdmrg.HeisenbergInteraction()), cell_size=2)
-    # idmrg.kernel(D=16, two_site=True, max_iter=200, msweeps=1, verbosity=3,
-                 # rotate=False)
-
-    # sleep(3)
-    # idmrg.kernel(D=16, two_site=True, max_iter=200, msweeps=1, verbosity=3,
-                 # rotate=True)
-    # sleep(3)
-
-    idmrg.kernel(D=16, two_site=True, max_iter=1000, msweeps=5, verbosity=3,
+    idmrg.kernel(D=16, two_site=False, max_iter=20, msweeps=1, verbosity=3,
                  rotate=False)
-    idmrg.kernel(D=16, two_site=True, max_iter=100, msweeps=1, verbosity=3,
-                 rotate=True)
