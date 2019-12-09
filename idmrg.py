@@ -5,6 +5,11 @@ from scipy.linalg import polar, svd
 from scipy.sparse.linalg import eigsh, LinearOperator, eigs
 import ogdmrg
 
+import unittest
+from numpy.testing import assert_allclose
+
+from pyscf.lib import davidson
+
 
 def NN_to_MPO(NN, tol=1e-12):
     NN = NN.transpose([0, 2, 1, 3])
@@ -200,8 +205,8 @@ class IDMRG:
         w, v = eigs(LO, k=1, which='LM')
         return w[0]
 
-    def kernel(self, D=16, two_site=False, max_iter=10, which='SA',
-               msweeps=1, verbosity=1, rotate=True):
+    def kernel(self, D=16, two_site=False, max_iter=10, msweeps=1, verbosity=1,
+               rotate=True):
         """Optimize the iDMRG.
 
         Args:
@@ -209,8 +214,6 @@ class IDMRG:
             two_site: True if you wan't do to two-site update, False if you
             want to do one-site update.
             max_iter: Maximal number of unitcells to optimize in this update.
-            which: Which eigenvalue do you want to find?
-            Same arguments as in `scipy.sparse.linalg.eigsh` are allowed.
         """
         if self.sites is None:
             self.sites = [
@@ -242,7 +245,7 @@ class IDMRG:
         for i in range(max_iter):
             # Update the current unit cells
             for j in range(msweeps):
-                self.optimizeUnitCells(D, two_site, which, verbosity, rotate)
+                self.optimizeUnitCells(D, two_site, verbosity, rotate)
 
             info = {
                 'it': i,
@@ -469,6 +472,8 @@ class IDMRG:
         return print_info
 
     def Heff(self, AA, two_site, info):
+        """Executes a matvec
+        """
         AA = AA.reshape(info['AAshape'])
         LE = self.LEnvironment[info['sites'][0]]
         RE = self.REnvironment[info['sites'][-1] + 1]
@@ -480,7 +485,22 @@ class IDMRG:
         result = np.tensordot(result, RE, axes=[[1, 2 + two_site], [2, 1]])
         return result.ravel()
 
-    def optimizeUnitCells(self, D, two_site, which, verbosity, rotate):
+    def heff_diagonal(self, two_site, info):
+        """diagonal of the matvec
+        """
+        LE = self.LEnvironment[info['sites'][0]]
+        RE = self.REnvironment[info['sites'][-1] + 1]
+
+        LE_diag = np.diagonal(LE, axis1=0, axis2=2)
+        RE_diag = np.diagonal(RE, axis1=0, axis2=2)
+        MPO_diag = np.diagonal(self.MPO, axis1=1, axis2=3)
+
+        diag = np.tensordot(LE_diag, MPO_diag, axes=[[0], [0]])
+        if two_site:
+            diag = np.tensordot(diag, MPO_diag, axes=[[1], [0]])
+        return np.tensordot(diag, RE_diag, axes=[[1 + two_site], [0]]).ravel()
+
+    def optimizeUnitCells(self, D, two_site, verbosity, rotate):
         """Optimizes the two unit cells.
         """
         for info in self._sweep(two_site):
@@ -490,21 +510,47 @@ class IDMRG:
                 (AA.size,) * 2, matvec=lambda x: self.Heff(x, two_site, info),
                 dtype=complex
             )
-            w, v = eigsh(H, k=1, v0=AA.ravel(), which=which)
-            self.current_E = w[0]
+            which = {'h': 'SA', 'pf': 'LM'}
+            diagonal = self.heff_diagonal(two_site, info)
+
+            if which[self.kind] == 'SA':
+                w, v = davidson(lambda x: self.Heff(x, two_site, info),
+                                x0=AA.ravel(), precond=diagonal)
+            else:
+                w, v = eigsh(H, k=1, v0=AA.ravel(), which=which[self.kind])
+                w, v = w[0], v[:, 0]
+
+            self.current_E = w
             print_info = {
                 'sites': info['sites'],
-                'fidelity': 1 - abs(np.dot(AA.ravel().conj(), v[:, 0])),
+                'fidelity': 1 - abs(np.dot(AA.ravel().conj(), v)),
                 'energy': self.energy,
             }
             print_info = {**print_info,
-                          **self.update_sites(v[:, 0], two_site, info, D,
-                                              rotate)}
+                          **self.update_sites(v, two_site, info, D, rotate)}
             if verbosity >= 3:
                 print(print_info)
 
 
+class TestDMRG(unittest.TestCase):
+    verbosity = 0
+
+    def test_DMRG_diagonal(self):
+        idmrg = IDMRG(NN_to_MPO(ogdmrg.HeisenbergInteraction()), cell_size=2)
+        idmrg.kernel(D=16, max_iter=10, msweeps=1, verbosity=self.verbosity)
+
+        two_site = True
+        info = next(idmrg._sweep(two_site))
+        info['AAshape'] = idmrg.make_center_site(two_site, info).shape
+        diag = idmrg.heff_diagonal(two_site, info)
+
+        def cdiag(i):
+            x = np.zeros(len(diag))
+            x[i] = 1.
+            return idmrg.Heff(x, two_site, info)[i]
+        calcdiag = np.array([cdiag(i) for i in range(len(diag))])
+        assert_allclose(calcdiag, diag)
+
+
 if __name__ == '__main__':
-    idmrg = IDMRG(NN_to_MPO(ogdmrg.HeisenbergInteraction()), cell_size=2)
-    idmrg.kernel(D=16, two_site=False, max_iter=100, msweeps=3, verbosity=2,
-                 rotate=True)
+    unittest.main()
