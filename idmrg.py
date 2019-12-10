@@ -12,7 +12,7 @@ from pyscf.lib import davidson
 
 
 def NN_to_MPO(NN, tol=1e-12):
-    """Transforms a neares neighbour interaction term (bra1, bra2, ket1, ket2)
+    """Transforms a nearest neighbour interaction term (bra1, bra2, ket1, ket2)
     to its corresponding MPO (MPO1, ket1, MPO2, bra1).
     """
     NN = NN.transpose([0, 2, 1, 3])
@@ -278,13 +278,21 @@ class IDMRG:
             info = {
                 'it': i,
                 'energy': self.energy,
-                'L_tf': 1 - abs(self.transfer_eig(self.Lcel, self.pLcel)),
-                'R_tf': 1 - abs(self.transfer_eig(self.Rcel, self.pRcel)),
-                'mixed_tf': 1 - abs(self.transfer_eig(self.Lcel, self.Rcel))
+                # 'L_tf': 1 - abs(self.transfer_eig(self.Lcel, self.pLcel)),
+                # 'R_tf': 1 - abs(self.transfer_eig(self.Rcel, self.pRcel)),
+                # 'mixed_tf': 1 - abs(self.transfer_eig(self.Lcel, self.Rcel))
             }
             if verbosity >= 1:
                 print(info)
             self.newUnitCells()
+
+        print({
+            'it': i,
+            'energy': self.energy,
+            'L_tf': 1 - abs(self.transfer_eig(self.Lcel, self.pLcel)),
+            'R_tf': 1 - abs(self.transfer_eig(self.Rcel, self.pRcel)),
+            'mixed_tf': 1 - abs(self.transfer_eig(self.Lcel, self.Rcel))
+        })
         return self.energy
 
     def newUnitCells(self):
