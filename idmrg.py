@@ -1,14 +1,53 @@
 import numpy as np
 from numpy.random import rand
 from numpy.linalg import norm
-from scipy.linalg import polar, svd
+from scipy.linalg import polar
+from scipy.linalg import svd
 from scipy.sparse.linalg import LinearOperator, eigs
+from numpy import tensordot
 import ogdmrg
 
 import unittest
 from numpy.testing import assert_allclose
-
 from pyscf.lib import davidson
+
+
+def qrpos(A, tol=1e-10):
+    """Positive QR
+    """
+    from scipy.linalg import qr
+    q, r = qr(A, mode='economic')
+
+    for i in range(q.shape[1]):
+        fel = np.argmax(abs(r[i, :]) > tol)
+        phase = (r[i, fel] / abs(r[i, fel]))
+        r[i, :] *= phase.conj()
+        q[:, i] *= phase
+    assert np.allclose(A, q @ r)
+    return q, r
+
+
+def usvd(A, tol=1e-13):
+    """Trying to make SVD unique.
+    """
+    u, s, v = svd(A)
+
+    svd_diff = (s[:-1] - s[1:])
+    # Array with Trues every time this singular value is different than the
+    # previous one (up to a tolerance)
+    ns = np.concatenate(([0], np.where(svd_diff > tol)[0] + 1, [len(s)]))
+    AA = u @ np.diag(s) @ v
+
+    for begin, end in zip(ns, ns[1:]):
+        q, r = qrpos(u[:, begin:end].conj().T)
+        u[:, begin:end] = r.conj().T
+        v[begin:end, :] = q.conj().T @ v[begin:end, :]
+
+    assert np.allclose(u.conj().T @ u, np.eye(u.shape[1]))
+    assert np.allclose(v @ v.conj().T, np.eye(v.shape[0]))
+
+    assert np.allclose(AA, u @ np.diag(s) @ v)
+    return u, s, v
 
 
 def NN_to_MPO(NN, tol=1e-12):
@@ -84,13 +123,13 @@ class Environment:
                 )
 
             if self.reverse:
-                env = np.tensordot(A.conj(), penv, [[2], [0]])
-                env = np.tensordot(env, self._idmrg.MPO, [[1, 2], [3, 2]])
-                self._envs[index] = np.tensordot(env, A, [[1, 3], [2, 1]])
+                env = tensordot(A.conj(), penv, [[2], [0]])
+                env = tensordot(env, self._idmrg.MPO, [[1, 2], [3, 2]])
+                self._envs[index] = tensordot(env, A, [[1, 3], [2, 1]])
             else:
-                env = np.tensordot(A.conj(), penv, [[0], [0]])
-                env = np.tensordot(env, self._idmrg.MPO, [[0, 2], [3, 0]])
-                self._envs[index] = np.tensordot(env, A, [[1, 2], [0, 1]])
+                env = tensordot(A.conj(), penv, [[0], [0]])
+                env = tensordot(env, self._idmrg.MPO, [[0, 2], [3, 0]])
+                self._envs[index] = tensordot(env, A, [[1, 2], [0, 1]])
 
             return self._envs[index]
 
@@ -135,7 +174,7 @@ class IDMRG:
 
         # We don't initialize the sites
         self.sites, self.center_bond = None, None
-        self._previous_sites = None
+        self._prev_sites = None
 
         self.LEnvironment = Environment(self, reverse=False)
         self.REnvironment = Environment(self, reverse=True)
@@ -172,7 +211,7 @@ class IDMRG:
         """The tensors of the previous left unit cell.
         """
         try:
-            return self._previous_sites[:self.cell_size]
+            return self._prev_sites[:self.cell_size]
         except TypeError:
             return None
 
@@ -187,7 +226,7 @@ class IDMRG:
         """The tensors of the previous right unit cell.
         """
         try:
-            return self._previous_sites[self.cell_size:]
+            return self._prev_sites[self.cell_size:]
         except TypeError:
             return None
 
@@ -211,8 +250,8 @@ class IDMRG:
 
         def transfer(A, B, x):
             x = x.reshape(A.shape[0], B.shape[0])
-            x = np.tensordot(x, A, [[0], [0]])
-            return np.tensordot(x, B.conj(), [[0, 1], [0, 1]]).ravel()
+            x = tensordot(x, A, [[0], [0]])
+            return tensordot(x, B.conj(), [[0, 1], [0, 1]]).ravel()
 
         def fullTF(x):
             for A, B in zip(A_array, B_array):
@@ -278,9 +317,9 @@ class IDMRG:
             info = {
                 'it': i,
                 'energy': self.energy,
-                # 'L_tf': 1 - abs(self.transfer_eig(self.Lcel, self.pLcel)),
-                # 'R_tf': 1 - abs(self.transfer_eig(self.Rcel, self.pRcel)),
-                # 'mixed_tf': 1 - abs(self.transfer_eig(self.Lcel, self.Rcel))
+                'L_tf': 1 - abs(self.transfer_eig(self.Lcel, self.pLcel)),
+                'R_tf': 1 - abs(self.transfer_eig(self.Rcel, self.pRcel)),
+                'mixed_tf': 1 - abs(self.transfer_eig(self.Lcel, self.Rcel))
             }
             if verbosity >= 1:
                 print(info)
@@ -321,7 +360,7 @@ class IDMRG:
                 self.REnvironment[self.center_bond]
 
         # Pushing left and right cells to the previous ones
-        self._previous_sites = tuple([s.copy() for s in self.sites])
+        self._prev_sites = [s.copy() for s in self.sites]
 
         # Padding with zeros
         if self.LEnvironment[0].shape[0] != self.sites[0].shape[0]:
@@ -385,15 +424,15 @@ class IDMRG:
         if info['center_at'] == 'center':
             A1 = self.sites[info['sites'][0]]
             A2 = self.sites[info['sites'][1]]
-            AA = np.tensordot(A1, self.c, axes=1)
-            AA = np.tensordot(AA, A2, axes=1)
+            AA = tensordot(A1, self.c, axes=1)
+            AA = tensordot(AA, A2, axes=1)
             info['AAshape'] = AA.shape
             return AA
 
         if two_site:
             A1 = self.sites[info['sites'][0]]
             A2 = self.sites[info['sites'][1]]
-            AA = np.tensordot(A1, A2, axes=1)
+            AA = tensordot(A1, A2, axes=1)
         else:
             AA = self.sites[info['sites'][0]]
         info['AAshape'] = AA.shape
@@ -402,9 +441,9 @@ class IDMRG:
         #   * left when moving right
         #   * right when moving left
         if info['center_at'] == 'left':
-            return np.tensordot(self.c, AA, axes=1)
+            return tensordot(self.c, AA, axes=1)
         elif info['center_at'] == 'right':
-            return np.tensordot(AA, self.c, axes=1)
+            return tensordot(AA, self.c, axes=1)
         else:
             ValueError(f'Invalid info["center_at"]: {info["center_at"]}')
 
@@ -415,7 +454,7 @@ class IDMRG:
             ValueError(f'Invalid side: {side}, choose "left" or "right".')
 
         # No previous sites saved
-        if self._previous_sites is None or not rotate:
+        if self._prev_sites is None or not rotate:
             return A, np.eye(A.shape[0 if side == 'left' else -1]), None
 
         # The site will be canonicalized to the left while it is part of the
@@ -423,23 +462,23 @@ class IDMRG:
         if (side == 'left') == (site < self.cell_size):
             return A, np.eye(A.shape[0 if side == 'left' else -1]), None
 
-        pA = self._previous_sites[site]
+        pA = self._prev_sites[site]
 
         # Different shape with previous tensor.
         if pA.shape != A.shape:
             return A, np.eye(A.shape[0 if side == 'left' else -1]), None
 
         if side == 'left':
-            AA = np.tensordot(pA, A.conj(), [[1, 2], [1, 2]])
+            AA = tensordot(pA, A.conj(), [[1, 2], [1, 2]])
         else:
-            AA = np.tensordot(A.conj(), pA, [[0, 1], [0, 1]])
+            AA = tensordot(A.conj(), pA, [[0, 1], [0, 1]])
         u, s, v = svd(AA, full_matrices=False)
 
         Q, uni = u @ v, np.max(abs(s - 1))
         if side == 'left':
-            A = np.tensordot(Q, A, [[1], [0]])
+            A = tensordot(Q, A, [[1], [0]])
         else:
-            A = np.tensordot(A, Q, [[2], [0]])
+            A = tensordot(A, Q, [[2], [0]])
 
         return A, Q, uni
 
@@ -454,7 +493,7 @@ class IDMRG:
         if two_site:
             assert len(sites) == 2
             newshape = (info['AAshape'][0] * info['AAshape'][1], -1)
-            u, s, v = svd(AA.reshape(newshape))
+            u, s, v = usvd(AA.reshape(newshape))
             D = min(len(s), D)
 
             # Fill in left and right site and center site
@@ -515,11 +554,11 @@ class IDMRG:
         LE = self.LEnvironment[info['sites'][0]]
         RE = self.REnvironment[info['sites'][-1] + 1]
 
-        result = np.tensordot(LE, AA, axes=1)
-        result = np.tensordot(result, self.MPO, axes=[[1, 2], [0, 1]])
+        result = tensordot(LE, AA, axes=1)
+        result = tensordot(result, self.MPO, axes=[[1, 2], [0, 1]])
         if two_site:
-            result = np.tensordot(result, self.MPO, axes=[[1, 3], [1, 0]])
-        result = np.tensordot(result, RE, axes=[[1, 2 + two_site], [2, 1]])
+            result = tensordot(result, self.MPO, axes=[[1, 3], [1, 0]])
+        result = tensordot(result, RE, axes=[[1, 2 + two_site], [2, 1]])
         return self.sign * result.ravel()
 
     def heff_diagonal(self, two_site, info):
@@ -532,11 +571,11 @@ class IDMRG:
         RE_diag = np.diagonal(RE, axis1=0, axis2=2)
         MPO_diag = np.diagonal(self.MPO, axis1=1, axis2=3)
 
-        diag = np.tensordot(LE_diag, MPO_diag, axes=[[0], [0]])
+        diag = tensordot(LE_diag, MPO_diag, axes=[[0], [0]])
         if two_site:
-            diag = np.tensordot(diag, MPO_diag, axes=[[1], [0]])
+            diag = tensordot(diag, MPO_diag, axes=[[1], [0]])
         return self.sign * \
-            np.tensordot(diag, RE_diag, axes=[[1 + two_site], [0]]).ravel()
+            tensordot(diag, RE_diag, axes=[[1 + two_site], [0]]).ravel()
 
     def optimizeUnitCells(self, D, two_site, verbosity, rotate):
         """Optimizes the two unit cells.
@@ -561,6 +600,38 @@ class IDMRG:
                 print(print_info)
         if verbosity >= 2:
             print()
+
+    def transform_LR_guage(self, Q, P):
+        """Go from ... Al Al Al Al c Ar Ar Ar Ar Ar ...
+        to ... Al Q' Q Al Q' Q Al Q' Q c P P' Ar P P' Ar ...
+
+        Q and P are inserted at unit cell devisions.
+
+        * Al_new = Q Al Q'
+        * Ar_new = P' Ar P
+        * c_new = Q c P
+        """
+        self.c = Q @ self.c @ P
+        self.sites[0] = tensordot(Q, self.sites[0], axes=1)
+        self.sites[-1] = tensordot(self.sites[-1], P, axes=1)
+        self.sites[self.cell_size - 1] = \
+            tensordot(self.sites[self.cell_size - 1], Q.conj().T, axes=1)
+        self.sites[self.cell_size] = \
+            tensordot(P.conj().T, self.sites[self.cell_size], axes=1)
+
+        self._prev_sites[0] = tensordot(Q, self._prev_sites[0], axes=1)
+        self._prev_sites[-1] = tensordot(self._prev_sites[-1], P, axes=1)
+        self._prev_sites[self.cell_size - 1] = \
+            tensordot(self._prev_sites[self.cell_size - 1], Q.conj().T, axes=1)
+        self._prev_sites[self.cell_size] = \
+            tensordot(P.conj().T, self._prev_sites[self.cell_size], axes=1)
+
+        self.LEnvironment[0] = \
+            tensordot(tensordot(Q.T, self.LEnvironment[0], axes=[[0], [0]]),
+                      Q.conj().T, axes=[[2], [0]])
+        self.REnvironment[self.end_bond] = \
+            tensordot(tensordot(P.T, self.REnvironment[self.end_bond],
+                                axes=1), P.conj().T, axes=[[2], [1]])
 
 
 class TestDMRG(unittest.TestCase):
