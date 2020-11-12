@@ -30,7 +30,7 @@ def qrpos(A, tol=1e-10):
 def usvd(A, tol=1e-13):
     """Trying to make SVD unique.
     """
-    u, s, v = svd(A)
+    u, s, v = svd(A, full_matrices=False)
 
     svd_diff = (s[:-1] - s[1:])
     # Array with Trues every time this singular value is different than the
